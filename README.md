@@ -270,6 +270,12 @@ PHP 8.0 → 8.2+ 的已知破坏点，上线前在预发跑一遍：
 
 ---
 
+## 许可
+
+MIT，见 [LICENSE](LICENSE)。
+
+---
+
 ## 目录
 
 ```
@@ -281,6 +287,7 @@ PHP 8.0 → 8.2+ 的已知破坏点，上线前在预发跑一遍：
 │   └── supervisord.conf
 ├── build.sh
 ├── docker-compose.example.yml
+├── LICENSE
 ├── .dockerignore
 ├── .gitignore
 └── .github/
