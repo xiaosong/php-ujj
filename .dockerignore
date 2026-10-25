@@ -1,5 +1,15 @@
 .git
+.gitignore
 .github
 *.md
+*.log
+.DS_Store
+.env
+
+# 构建不需要的运行时/本地文件，避免进入构建上下文
 docker-compose*.yml
 build.sh
+www
+wwwlogs
+Caddyfile
+supervisord.d

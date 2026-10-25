@@ -3,8 +3,10 @@
 Caddy + PHP-FPM + Redis + Supervisor 的单容器运行时。原 `tokumeikoi/lcrp8`（2023-05 停更、PHP 8.0.25 已 EOL）的自维护替代品。
 
 - 基础镜像 `alpine:3.24`，PHP **8.4.27**（含 CVE-2026-109618 / CVE-2026-109619 修复）
+- Caddy 固定上游 **2.11.7**（`caddy:2.11.7-alpine`，不再跟随浮动的 `:2-alpine`）
 - 目录结构、配置文件、启动命令与原镜像**完全一致**，业务侧无需改动
 - 多架构：`linux/amd64`、`linux/arm64`
+- 默认 `ICU_DATA=full`，与原镜像一样带完整 locale 数据；可用 `ICU_DATA=en` 构建瘦身版
 
 ---
 
@@ -34,7 +36,7 @@ curl -s https://dl-cdn.alpinelinux.org/alpine/v3.24/community/x86_64/APKINDEX.ta
   | tar -xzO APKINDEX | grep -A2 '^P:php84$'
 ```
 
-构建脚本已内置版本断言，低于修复线直接失败：
+构建脚本和 Dockerfile 都内置版本断言，低于修复线直接失败：
 
 ```
 $ ./build.sh
@@ -45,12 +47,31 @@ $ ./build.sh
 
 > 一个坑：Alpine 的 secdb（`secdb.alpinelinux.org/v3.24/community.json`）目前**还没**把这两个 CVE 标到 php84 条目上（最后记录停在 8.4.9），属数据库同步滞后。v3.22 的 php82 条目已标注 `8.2.35-r0: [CVE-2026-109618, CVE-2026-109619]`，可作旁证。**判断以包版本为准，别以 secdb 为准。**
 
+### Alpine 包扫描（2026-10-25）
+
+按 `secdb.alpinelinux.org/v3.24/{main,community}.json` 对镜像的完整包闭包逐包比对：
+
+- **0 个**「安装版本 < 首个修复版本」的已知漏洞。
+- 12 条 secdb 标记为 `0`（无修复/争议）的条目，集中在 `busybox`、`curl`、`git`、`zlib`。其中 zlib 的 CVE-2023-45853 / CVE-2023-6992 属于 minizip（本镜像不提供该可执行文件）；其余条目需按上游公告评估，当前 Alpine 分支没有可用修复包，升级分支或移除对应组件是唯一手段。
+- Caddy 二进制不在 Alpine secdb 覆盖范围内，只能跟随上游 release；当前固定 2.11.7（上游 2026-10-03 发布）。
+
+### 本次安全加固
+
+- PHP 默认值：`expose_php=Off`、`display_errors=Off`、`session.cookie_httponly=1`（[`config/php-hardening.ini`](config/php-hardening.ini)）
+- Redis 显式 `--bind 127.0.0.1 -::1 --protected-mode yes`，不再可能监听外部地址
+- php-fpm unix socket 显式 `listen.mode = 0660`
+- compose 示例加 `no-new-privileges:true`
+- CI action 全部固定到 commit SHA；手动输入先白名单校验；推送后按 digest 复验；生成 SLSA provenance + SBOM
+- Dockerfile 构建期再次断言 PHP 最低版本（绕过 `build.sh` 直接 `docker build` 也拦得住）
+- Dependabot 每周跟踪 action / 基础镜像升级
+
 ---
 
 ## 构建
 
 ```bash
-./build.sh                                              # php8.4 / alpine 3.24 / amd64
+./build.sh                                              # php8.4 / alpine 3.24 / amd64 / ICU full
+ICU_DATA=en ./build.sh                                  # 瘦身：仅 en_US/GB ICU 数据
 PHP_MAJOR=83 ./build.sh                                 # 换 PHP 版本
 APK_MIRROR=https://mirrors.aliyun.com/alpine ./build.sh # 国内构建
 PLATFORMS=linux/amd64,linux/arm64 PUSH=1 IMAGE=your.registry/lcrp8 ./build.sh
@@ -61,15 +82,51 @@ PLATFORMS=linux/amd64,linux/arm64 PUSH=1 IMAGE=your.registry/lcrp8 ./build.sh
 ```bash
 docker build -t lcrp8:php84 .
 docker build -t lcrp8:php83 --build-arg PHP_MAJOR=83 .
+docker build -t lcrp8:php84-slim --build-arg ICU_DATA=en .
 ```
 
 构建参数：
 
 | ARG | 默认 | 说明 |
 |---|---|---|
-| `PHP_MAJOR` | `84` | `84` / `83` / `82` |
+| `PHP_MAJOR` | `84` | `84` / `83` / `82` / `85` |
 | `ALPINE_VERSION` | `3.24` | 换分支时注意该分支的 php 版本是否已修复漏洞 |
 | `APK_MIRROR` | `https://dl-cdn.alpinelinux.org/alpine` | 国内可换阿里云 / 中科大 |
+| `ICU_DATA` | `full` | `full`：完整 ICU 数据（31.6 MiB，含 zh 等）；`en`：仅 en_US/GB（2.9 MiB） |
+
+> `ICU_DATA` 不是可有可无的优化项：原 Alpine 3.15 的 `icu-libs` 自带完整数据，3.16 起拆成 `icu-data-en` / `icu-data-full`。选 `en` 时 `IntlDateFormatter('zh_CN')`、`Collator('zh')` 等会退化到根 locale，**默认 full 是为了保持与原镜像一致的行为**。
+
+---
+
+## 体积
+
+按 Alpine APKINDEX 的 installed-size 估算（不含 Docker 层压缩差异）：
+
+| 组成 | 安装后 | 说明 |
+|---|---|---|
+| apk 包闭包（ICU full） | ≈ 149 MiB | PHP + 扩展 + supervisor + redis + git 等；ICU 数据实际约 31.6 MiB |
+| apk 包闭包（ICU en） | ≈ 120 MiB | 比 full 少约 29 MiB |
+| Caddy 2.11.7 二进制 | 49.5 MiB | 已 strip，官方 release |
+| Alpine base | ≈ 8 MiB | |
+| **合计（未压缩，full / en）** | **≈ 207 / 177 MiB** | `docker images` 口径的估算值 |
+
+原镜像（PHP 8.0 / alpine 3.15 / Caddy 38MB）包闭包约 155 MiB，合计约 201 MiB。也就是说：
+**默认 full 与原镜像体积基本持平（约 +6 MiB，主要是新版 Caddy），en 才明显更小（约 −24 MiB）。**
+
+> Alpine 的 `icu-libs` 依赖虚拟包 `icu-data`，默认 provider 是 `icu-data-en`；`icu-data-full` 与 en 安装同一个 `icudt*.dat`，所以 Dockerfile 在 PHP 包之后**最后**装 full，让完整数据覆盖 en 的小文件。两份包记录会同时存在，这是 Alpine 的预期行为；容器内不要 `apk fix` 或重装 `icu-data-en`，否则可能把数据覆盖回 en，升级请重建镜像。
+
+继续压缩只能动有功能代价的组件，均未默认实施：
+
+| 方案 | 省（安装后） | 代价 |
+|---|---|---|
+| `ICU_DATA=en` | ≈ 29 MiB | 非英语 locale 数据缺失 |
+| 去掉 supervisor（换 s6/自写 init） | ≈ 26.5 MiB | 丢 `supervisorctl`、`/run/supervisor/*.conf` 外挂能力 |
+| 去掉 git | ≈ 6.8 MiB | 容器内 composer 拉 git 源会失败 |
+| 自编译 gd 关闭 AVIF | ≈ 13.5 MiB | `imageavif()` 失效，且要自维护扩展构建 |
+| 自编译 Caddy 精简模块 | 约 10–20 MiB（未实测） | Caddyfile 兼容性无法保证 |
+| UPX 压 Caddy | 压缩层显著变小 | 运行时解压内存、杀软误报、审计困难，不建议 |
+
+当前安全裁剪已做：合并配置层、去掉 `/tmp` 中间文件、同层清理 apk 缓存；Alpine 的文档包本就没有安装，PHP/Redis/Git/Caddy 二进制均已 strip，所以**没有剩下的“无损大头”**。
 
 ---
 
@@ -86,12 +143,12 @@ docker compose up -d
 /www                          代码目录（WORKDIR，外挂）
 /wwwlogs                      php-fpm.log / php-slow.log（外挂）
 /run/caddy/Caddyfile          Caddy 配置（外挂）
-/run/supervisor/*.conf        supervisord 附加程序（外挂）
+/run/supervisor/*.conf        supervisord 附加程序（外挂，建议只读挂载）
 /etc/php84/php-fpm.d/www.conf FPM 配置（镜像内）
 /tmp/php-cgi.sock             FPM socket，Caddy 反代目标
 ```
 
-进程树：`supervisord → php-fpm8 -RF / caddy run --config /run/caddy/Caddyfile / redis-server / crond -f`
+进程树：`supervisord → php-fpm8 -RF / caddy run --config /run/caddy/Caddyfile / redis-server（仅 127.0.0.1） / crond -f`
 
 端口：`80`、`443`。
 
@@ -136,28 +193,38 @@ PHP 8.0 → 8.2+ 的已知破坏点，上线前在预发跑一遍：
 
 ## 维护
 
-`.github/workflows/build.yml` 已配好：**每周一自动重建并推送 GHCR**（多架构），alpine 的安全更新会自动进来；也支持手动触发并指定 PHP 主版本。
+`.github/workflows/build.yml` 已配好：**每周一自动重建并推送 GHCR**（多架构），alpine 的安全更新会自动进来；也支持手动触发并指定 PHP 主版本 / ICU 数据。
+
+- Caddy 固定次版本；`.github/dependabot.yml` 每周提 PR 跟踪 Caddy 升级。Alpine 版本走 `ALPINE_VERSION` 构建参数，Dependabot 解析不到，需手动改。
+- CI action 固定到 commit SHA，由 Dependabot 更新；不要直接改回浮动 tag。
+- 推送后 CI 会按刚生成的 digest 拉取并断言 PHP 版本、`expose_php`、FPM 配置、扩展列表。
 
 出新 CVE 时的处理顺序：
 
 1. 查官方修复版本 → 确认 Alpine 对应分支的包是否已跟进（`https://pkgs.alpinelinux.org/packages?name=php84`）
 2. 改 `ALPINE_VERSION` 或 `PHP_MAJOR`，跑 `./build.sh`
-3. 冒烟测试会打印 `php -v` 和 `php -m`，确认版本越过修复线
+3. 冒烟测试会打印 `php -v`、`php -m`、FPM 配置测试和安全默认值，确认版本越过修复线
 4. 保留旧 tag，回滚只需改 image tag
 
 ---
 
 ## 已知风险
 
-1. **php-fpm 以 root 运行**（`config/php-fpm.conf` 里 `user = root`）——一旦 RCE 即容器 root。建议改 `user = www-data` 并 `chown -R www-data /www`，需确认业务文件权限。
-2. **`pm.max_children = 300`**——小机器上被打满就是 OOM。按 `可用内存 / 单进程常驻` 重算。
-3. **无 HEALTHCHECK**——Caddy 可能只监听 443 且用内部证书，硬加会误报。需要时自行加 `curl -fsS http://127.0.0.1/`。
-4. **容器以 root 启动**——为与原镜像行为一致而保留。要加固需同时处理 80/443 绑定（`CAP_NET_BIND_SERVICE` 或改高位端口）。
-5. **Caddy 大版本跨度**——若 Caddyfile 里有已废弃指令，新版会启动失败。上线前先验：
+1. **php-fpm 以 root 运行**（`config/php-fpm.conf` 里 `user = root`）——一旦 RCE 即容器 root。改成 `www-data` 需同时处理 `/www`、`/wwwlogs` 的挂载权限，属于行为变更，未默认做。
+2. **容器以 root 启动**——为与原镜像行为一致而保留；80/443 绑定也需要。`no-new-privileges` 只能阻止再提权，不能把 root 变成非 root。
+3. **`pm.max_children = 300`**——小机器上被打满就是 OOM。按 `可用内存 / 单进程常驻` 重算。
+4. **Caddy admin API 默认监听 `127.0.0.1:2019` 且无认证**——应用侧 RCE 后可改 Caddy 配置、读证书。Caddyfile 由外挂提供，镜像内无法统一关闭；不需要动态配置时在 Caddyfile 顶部加 `{ admin off }`。
+5. **`pm.status_path = /phpfpm_status`**——默认 Caddy 不会把它转给 FPM（`php_fastcgi` 只匹配 `*.php`），但如果 Caddyfile 显式路由了它，会泄露进程/请求信息。对外暴露前加认证或删除该路由。
+6. **`/run/supervisor/supervisord.conf` 可追加 root 程序**——示例 compose 中该挂载默认注释；启用时请加 `:ro`。
+7. **无 HEALTHCHECK**——Caddy 可能只监听 443 且用内部证书，硬加会误报。需要时自行加 `curl -fsS http://127.0.0.1/`。
+8. **Caddy 大版本跨度**——若 Caddyfile 里有已废弃指令，2.11 会启动失败。上线前先验：
    ```bash
    docker run --rm -v $PWD/Caddyfile:/run/caddy/Caddyfile:ro lcrp8:php84 \
      caddy validate --config /run/caddy/Caddyfile
    ```
+9. **`session.cookie_httponly=1`**——这是安全默认值；如果老应用依赖 JS 读取 PHPSESSID，需要在应用层覆盖。
+10. **Redis 只绑回环**——其他容器/宿主不能再直连 6379；如原有跨容器依赖，需显式改回并自行加 ACL/密码，不建议。
+11. **`ICU_DATA=en` 的行为差异**——见上文；需要 zh 等 locale 时用默认 full。
 
 ---
 
@@ -168,9 +235,13 @@ PHP 8.0 → 8.2+ 的已知破坏点，上线前在预发跑一遍：
 ├── Dockerfile
 ├── config/
 │   ├── php-fpm.conf
+│   ├── php-hardening.ini
 │   └── supervisord.conf
 ├── build.sh
 ├── docker-compose.example.yml
 ├── .dockerignore
-└── .github/workflows/build.yml
+├── .gitignore
+└── .github/
+    ├── dependabot.yml
+    └── workflows/build.yml
 ```

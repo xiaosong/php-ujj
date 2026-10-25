@@ -10,8 +10,15 @@ on:
   workflow_dispatch:
     inputs:
       php_major:
-        description: "PHP 主版本（84 / 83 / 82）"
+        description: "PHP 主版本"
+        type: choice
+        options: ["84", "83", "82", "85"]
         default: "84"
+      icu_data:
+        description: "ICU 数据（full=完整 locale，en=瘦身）"
+        type: choice
+        options: ["full", "en"]
+        default: "full"
 
 env:
   IMAGE: ghcr.io/${{ github.repository }}
@@ -19,51 +26,80 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       - name: Login GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # workflow_dispatch 的输入不直接进 shell / build-args，先白名单校验再输出
+      - name: Validate inputs
+        id: vars
+        env:
+          PHP_MAJOR: ${{ inputs.php_major || '84' }}
+          ICU_DATA: ${{ inputs.icu_data || 'full' }}
+        run: |
+          set -eu
+          case "${PHP_MAJOR}" in
+            82|83|84|85) ;;
+            *) echo "unsupported php_major: ${PHP_MAJOR}" >&2; exit 1 ;;
+          esac
+          case "${ICU_DATA}" in
+            en|full) ;;
+            *) echo "unsupported icu_data: ${ICU_DATA}" >&2; exit 1 ;;
+          esac
+          echo "php_major=${PHP_MAJOR}" >> "$GITHUB_OUTPUT"
+          echo "icu_data=${ICU_DATA}" >> "$GITHUB_OUTPUT"
+
       - name: Meta
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
           images: ${{ env.IMAGE }}
           tags: |
-            type=raw,value=php${{ inputs.php_major || '84' }}
-            type=raw,value=php${{ inputs.php_major || '84' }}-{{date 'YYYYMMDD'}}
+            type=raw,value=php${{ steps.vars.outputs.php_major }}
+            type=raw,value=php${{ steps.vars.outputs.php_major }}-{{date 'YYYYMMDD'}}
             type=ref,event=tag
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build & push
-        uses: docker/build-push-action@v6
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
+          pull: true
+          # 生成 SLSA provenance 与 SBOM，随镜像一起推到 GHCR
+          provenance: true
+          sbom: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            PHP_MAJOR=${{ inputs.php_major || '84' }}
+            PHP_MAJOR=${{ steps.vars.outputs.php_major }}
             ALPINE_VERSION=3.24
+            ICU_DATA=${{ steps.vars.outputs.icu_data }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # 版本断言：PHP 必须越过 CVE-2026-109618 / CVE-2026-109619 的修复线
-      - name: Assert PHP version
+      # 版本断言 + 安全默认值断言：验最终推送的那个 digest，避免 tag 竞态
+      - name: Assert PHP version and hardening
         env:
-          PHP_MAJOR: ${{ inputs.php_major || '84' }}
+          PHP_MAJOR: ${{ steps.vars.outputs.php_major }}
+          DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           set -eux
           case "${PHP_MAJOR}" in
@@ -73,13 +109,17 @@ jobs:
             85) MIN=8.5.12 ;;
             *)  MIN=0 ;;
           esac
-          IMG="${{ env.IMAGE }}:php${PHP_MAJOR}"
-          # buildx 多架构构建的产物不在本地 daemon 里，先拉下来再验
+          IMG="${IMAGE}@${DIGEST}"
           docker pull --platform linux/amd64 "$IMG"
           docker run --rm --platform linux/amd64 -e MIN_PHP="${MIN}" "$IMG" php -r '
             $min = getenv("MIN_PHP");
             printf("PHP %s (need >= %s)\n", PHP_VERSION, $min ?: "-");
             if ($min !== "" && version_compare(PHP_VERSION, $min, "<")) { exit(1); }
           '
+          docker run --rm --platform linux/amd64 "$IMG" php -r '
+            if (ini_get("expose_php") || ini_get("display_errors")) { exit(1); }
+          '
           docker run --rm --platform linux/amd64 "$IMG" php -m
+          docker run --rm --platform linux/amd64 "$IMG" php-fpm8 -t
           docker run --rm --platform linux/amd64 "$IMG" php-fpm8 -v
+          docker run --rm --platform linux/amd64 "$IMG" caddy version

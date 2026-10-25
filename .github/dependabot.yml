@@ -1,0 +1,17 @@
+version: 2
+updates:
+  # CI 里的 action 固定到 commit SHA，由 Dependabot 提 PR 升级
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"
+
+  # Caddy 基础镜像（Alpine 走 Dockerfile 里的 ALPINE_VERSION 构建参数，需手动升级）
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "deps"

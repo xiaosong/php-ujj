@@ -8,6 +8,9 @@ services:
         PHP_MAJOR: "84"
         # APK_MIRROR: https://mirrors.aliyun.com/alpine
     restart: always
+    # 阻止 setuid 等途径提权（容器本身已以 root 启动，见 README「已知风险」）
+    security_opt:
+      - no-new-privileges:true
     ports:
       - "80:80"
       - "443:443"

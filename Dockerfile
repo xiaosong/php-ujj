@@ -16,6 +16,7 @@
 #   docker build -t lcrp8:8.4 .
 #   docker build -t lcrp8:8.3 --build-arg PHP_MAJOR=83 .
 #   docker build -t lcrp8:8.4 --build-arg APK_MIRROR=https://mirrors.aliyun.com/alpine .
+#   docker build -t lcrp8:8.4 --build-arg ICU_DATA=en .        # 瘦身版，仅 en_US/GB 数据
 #
 # 目录布局与原始镜像保持一致：/www（代码）、/wwwlogs（日志）、/run/caddy/Caddyfile（外挂）、
 # /run/supervisor/supervisord.conf（外挂附加配置）、php-fpm 监听 /tmp/php-cgi.sock
@@ -25,8 +26,9 @@ ARG PHP_MAJOR=84
 
 # ---------------------------------------------------------------------------
 # stage 1：取 Caddy 二进制（官方镜像多架构，跟随 caddy 安全更新）
+# 固定到具体次版本，避免 :2-alpine 漂移；升级请改这一行（Dependabot 也会提 PR）。
 # ---------------------------------------------------------------------------
-FROM caddy:2-alpine AS caddy
+FROM caddy:2.11.7-alpine AS caddy
 
 # ---------------------------------------------------------------------------
 # stage 2：运行时
@@ -37,6 +39,9 @@ ARG ALPINE_VERSION
 ARG PHP_MAJOR
 # 国内构建可换成 https://mirrors.aliyun.com/alpine 或 https://mirrors.ustc.edu.cn/alpine
 ARG APK_MIRROR=https://dl-cdn.alpinelinux.org/alpine
+# full：与原镜像一致的完整 ICU 数据（含 zh 等 locale，约 31.6MiB）
+# en  ：仅 en_US/GB，省约 28.7MiB，但非英语 locale 的 intl 排序/格式会退化
+ARG ICU_DATA=full
 
 LABEL org.opencontainers.image.title="lcrp8" \
       org.opencontainers.image.description="Caddy + PHP-FPM + Redis + Supervisor (LCRP stack), rebuilt from tokumeikoi/lcrp8" \
@@ -49,7 +54,18 @@ LABEL org.opencontainers.image.title="lcrp8" \
 #      - php8-zlib  → 新版 Alpine 已把 zlib 编进 php 主程序，无此独立包
 #      - php8-json  → PHP 8 起 json 恒定内置，无此独立包
 #      - php8-redis → 改名为 php8x-pecl-redis
+# 4) 构建期拒绝未知 PHP 主版本 / ICU 选项，避免拼错包名后悄悄装出残镜像
+# 5) ICU full 必须在最后装：php84-intl 会先按 provider_priority 拉入 en 数据，
+#    再装 full 才能让完整的 icudt*.dat 覆盖掉 en 的小文件（Alpine 官方推荐做法）
 RUN set -eux; \
+    case "${PHP_MAJOR}" in \
+        82|83|84|85) ;; \
+        *) echo "PHP_MAJOR must be one of 82/83/84/85" >&2; exit 1 ;; \
+    esac; \
+    case "${ICU_DATA}" in \
+        en|full) ;; \
+        *) echo "ICU_DATA must be en or full" >&2; exit 1 ;; \
+    esac; \
     printf '%s\n%s\n' \
         "${APK_MIRROR}/v${ALPINE_VERSION#v}/main" \
         "${APK_MIRROR}/v${ALPINE_VERSION#v}/community" > /etc/apk/repositories; \
@@ -89,27 +105,48 @@ RUN set -eux; \
         php${PHP_MAJOR}-xml \
         php${PHP_MAJOR}-xmlreader \
         php${PHP_MAJOR}-xmlwriter \
-        php${PHP_MAJOR}-zip
+        php${PHP_MAJOR}-zip; \
+    case "${ICU_DATA}" in \
+        full) apk add --no-cache icu-data-full ;; \
+        en)   apk add --no-cache icu-data-en ;; \
+    esac; \
+    rm -rf /var/cache/apk/* /tmp/* /var/tmp/*
 
 # 目录（与原镜像完全一致）
 RUN mkdir -p /www /wwwlogs /run/php /run/caddy /run/supervisor
 
-# 配置文件：与原镜像 byte-identical，路径改成新版 php 的 /etc/php8x
-COPY config/php-fpm.conf /tmp/php-fpm.conf
+# 配置文件：FPM / Supervisor 与原镜像保持一致；外加 PHP 安全默认值
+COPY config/php-fpm.conf /etc/php${PHP_MAJOR}/php-fpm.d/www.conf
+COPY config/php-hardening.ini /etc/php${PHP_MAJOR}/conf.d/99-hardening.ini
 COPY config/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+
 # 兼容层：让老配置/老脚本继续按 php8 的路径工作
 #   /etc/php8 -> /etc/php84   （挂 php.ini 请改挂 /etc/php84/php.ini）
 #   php8 / php-fpm8 / php     （supervisord.conf 里的 `php-fpm8 -RF` 不用改）
+# 构建期再断言一次 PHP 版本：绕过 build.sh 直接 docker build 也不会发出带已知漏洞的镜像
 RUN set -eux; \
-    mv /tmp/php-fpm.conf "/etc/php${PHP_MAJOR}/php-fpm.d/www.conf"; \
     ln -sfn "/etc/php${PHP_MAJOR}" /etc/php8; \
     ln -sf "/usr/bin/php${PHP_MAJOR}" /usr/local/bin/php8; \
     ln -sf "/usr/sbin/php-fpm${PHP_MAJOR}" /usr/local/bin/php-fpm8; \
     ln -sf "/usr/bin/php${PHP_MAJOR}" /usr/local/bin/php; \
+    case "${PHP_MAJOR}" in \
+        82) min=8.2.35 ;; \
+        83) min=8.3.36 ;; \
+        84) min=8.4.27 ;; \
+        85) min=8.5.12 ;; \
+        *)  min=0 ;; \
+    esac; \
+    MIN_PHP="${min}" php -r ' \
+        if (version_compare(PHP_VERSION, getenv("MIN_PHP"), "<")) { \
+            fwrite(STDERR, "PHP " . PHP_VERSION . " < " . getenv("MIN_PHP") . ", refusing to build\n"); \
+            exit(1); \
+        } \
+        echo "PHP " . PHP_VERSION . " >= " . getenv("MIN_PHP") . "\n"; \
+    '; \
     php -v
 
 COPY --from=caddy /usr/bin/caddy /usr/local/bin/caddy
 
 WORKDIR /www
-EXPOSE 443 80
+EXPOSE 80 443
 CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
