@@ -1,0 +1,85 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  schedule:
+    # 每周一 03:17 (UTC) 重建一次：让 alpine 的安全更新自动进来
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      php_major:
+        description: "PHP 主版本（84 / 83 / 82）"
+        default: "84"
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=php${{ inputs.php_major || '84' }}
+            type=raw,value=php${{ inputs.php_major || '84' }}-{{date 'YYYYMMDD'}}
+            type=ref,event=tag
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build & push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            PHP_MAJOR=${{ inputs.php_major || '84' }}
+            ALPINE_VERSION=3.24
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # 版本断言：PHP 必须越过 CVE-2026-109618 / CVE-2026-109619 的修复线
+      - name: Assert PHP version
+        env:
+          PHP_MAJOR: ${{ inputs.php_major || '84' }}
+        run: |
+          set -eux
+          case "${PHP_MAJOR}" in
+            82) MIN=8.2.35 ;;
+            83) MIN=8.3.36 ;;
+            84) MIN=8.4.27 ;;
+            85) MIN=8.5.12 ;;
+            *)  MIN=0 ;;
+          esac
+          IMG="${{ env.IMAGE }}:php${PHP_MAJOR}"
+          # buildx 多架构构建的产物不在本地 daemon 里，先拉下来再验
+          docker pull --platform linux/amd64 "$IMG"
+          docker run --rm --platform linux/amd64 -e MIN_PHP="${MIN}" "$IMG" php -r '
+            $min = getenv("MIN_PHP");
+            printf("PHP %s (need >= %s)\n", PHP_VERSION, $min ?: "-");
+            if ($min !== "" && version_compare(PHP_VERSION, $min, "<")) { exit(1); }
+          '
+          docker run --rm --platform linux/amd64 "$IMG" php -m
+          docker run --rm --platform linux/amd64 "$IMG" php-fpm8 -v

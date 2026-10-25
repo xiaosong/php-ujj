@@ -1,0 +1,27 @@
+# 与原始 tokumeikoi/lcrp8 的目录约定一致，换镜像时只改 image 一行即可
+services:
+  lcrp8:
+    image: lcrp8:php84
+    build:
+      context: .
+      args:
+        PHP_MAJOR: "84"
+        # APK_MIRROR: https://mirrors.aliyun.com/alpine
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./www:/www                                  # 站点代码
+      - ./wwwlogs:/wwwlogs                          # php-fpm / slow 日志
+      - ./Caddyfile:/run/caddy/Caddyfile:ro         # Caddy 配置（原镜像就是从这读的）
+      # - ./supervisord.d:/run/supervisor           # 追加 supervisord 程序
+      # - ./php.ini:/etc/php84/php.ini:ro           # 注意：新版路径是 /etc/php84，不是 /etc/php8
+      # - /etc/localtime:/etc/localtime:ro
+    ulimits:
+      nofile: 50000
+    # 需要调 pm.max_children 时再放开
+    # deploy:
+    #   resources:
+    #     limits:
+    #       memory: 2g
