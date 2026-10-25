@@ -7,6 +7,7 @@ Caddy + PHP-FPM + Redis + Supervisor 的单容器运行时。原 `tokumeikoi/lcr
 - 目录结构、配置文件、启动命令与原镜像**完全一致**，业务侧无需改动
 - 多架构：`linux/amd64`、`linux/arm64`
 - 默认 `ICU_DATA=full`，与原镜像一样带完整 locale 数据；可用 `ICU_DATA=en` 构建瘦身版
+- `PHP_MAJOR` 支持 `82`（必须配 `ALPINE_VERSION=3.22`）/ `83` / `84` / `85`；3.24 的 php85 尚无 opcache 包，构建会告警并跳过
 
 ---
 
@@ -19,8 +20,8 @@ Caddy + PHP-FPM + Redis + Supervisor 的单容器运行时。原 `tokumeikoi/lcr
 |---|---|---|---|
 | **8.4（默认）** | `php84 8.4.27-r0` | 8.4.27 | ✅ 等于修复版 |
 | 8.3 | `php83 8.3.36-r0` | 8.3.36 | ✅ 等于修复版 |
-| 8.5（可选） | `php85 8.5.12-r0` | 8.5.12 | ✅ 等于修复版 |
-| 8.2（需 `ALPINE_VERSION=3.22`） | `php82 8.2.35-r0` | 8.2.35 | ✅ 等于修复版 |
+| 8.5（可选） | `php85 8.5.12-r0` | 8.5.12 | ✅ 等于修复版；⚠️ v3.24 未打包 `php85-opcache` |
+| 8.2（需 `ALPINE_VERSION=3.22`） | `php82 8.2.35-r0` | 8.2.35 | ✅ 等于修复版；CI 会自动切到 3.22 |
 
 四路互证（2026-10-25 核对）：
 
@@ -73,6 +74,8 @@ $ ./build.sh
 ./build.sh                                              # php8.4 / alpine 3.24 / amd64 / ICU full
 ICU_DATA=en ./build.sh                                  # 瘦身：仅 en_US/GB ICU 数据
 PHP_MAJOR=83 ./build.sh                                 # 换 PHP 版本
+PHP_MAJOR=82 ALPINE_VERSION=3.22 ./build.sh             # 8.2 只在 3.22 仓库里
+APK_CACHE_BUST=$(date +%s) ./build.sh                   # 强制刷新 apk 包，不吃层缓存
 APK_MIRROR=https://mirrors.aliyun.com/alpine ./build.sh # 国内构建
 PLATFORMS=linux/amd64,linux/arm64 PUSH=1 IMAGE=your.registry/lcrp8 ./build.sh
 ```
@@ -89,29 +92,61 @@ docker build -t lcrp8:php84-slim --build-arg ICU_DATA=en .
 
 | ARG | 默认 | 说明 |
 |---|---|---|
-| `PHP_MAJOR` | `84` | `84` / `83` / `82` / `85` |
-| `ALPINE_VERSION` | `3.24` | 换分支时注意该分支的 php 版本是否已修复漏洞 |
+| `PHP_MAJOR` | `84` | `84` / `83` / `82` / `85`；`82` 必须配 `ALPINE_VERSION=3.22` |
+| `ALPINE_VERSION` | `3.24` | 换分支时注意该分支的 php 版本是否已修复漏洞；CI 对 82 自动用 3.22 |
 | `APK_MIRROR` | `https://dl-cdn.alpinelinux.org/alpine` | 国内可换阿里云 / 中科大 |
 | `ICU_DATA` | `full` | `full`：完整 ICU 数据（31.6 MiB，含 zh 等）；`en`：仅 en_US/GB（2.9 MiB） |
+| `APK_CACHE_BUST` | `0` | 任意变化值都会让 apk 层缓存失效；CI 每次传 `run_id`，本地刷新传时间戳 |
 
 > `ICU_DATA` 不是可有可无的优化项：原 Alpine 3.15 的 `icu-libs` 自带完整数据，3.16 起拆成 `icu-data-en` / `icu-data-full`。选 `en` 时 `IntlDateFormatter('zh_CN')`、`Collator('zh')` 等会退化到根 locale，**默认 full 是为了保持与原镜像一致的行为**。
 
 ---
 
+## 架构
+
+当前镜像刻意保持原镜像的“单容器多进程”形态：`supervisord` 作为 PID 1，拉起 `php-fpm`、`caddy`、`redis`、`crond` 四个进程。这样 `Caddyfile`、`/run/supervisor/*.conf`、`/www`、`/wwwlogs`、`/tmp/php-cgi.sock` 和启动命令都与原镜像一致，换镜像只改 tag。
+
+合理的地方：迁移成本为零，不需要拆 compose，老机器/老运维习惯不变。
+
+不合理的地方（新部署需要知道）：
+
+- 四个进程共享同一内存、网络和生命周期；Redis 重启会连带 Web 一起重启，无法独立扩缩容。
+- 进程全部是 root；一个 PHP 应用 RCE 就是容器 root（见「已知风险」）。
+- 多副本部署时 cron 会重复执行，Redis 也各自独立。
+- `supervisord` 本身不是 init，孤儿子进程可能变僵尸；示例 compose 已加 `init: true`，不用 compose 时请加 `--init`。
+- supervisor + Python 运行时约 28.3 MiB，是单容器方案的主要“管理税”。
+
+结论：**如果目标是替换原镜像，这个架构是合理的，不建议为省体积拆掉 supervisor**。新项目建议拆成 caddy / php-fpm / redis / cron 四个服务，Redis 独立持久化并加 ACL，cron 单独跑一个副本；那时镜像可以去掉 supervisor、redis、crond 以及整条 Python 依赖。
+
 ## 体积
 
-按 Alpine APKINDEX 的 installed-size 估算（不含 Docker 层压缩差异）：
+按 Alpine v3.24 APKINDEX 的 installed-size 实测（2026-10-25）：
 
-| 组成 | 安装后 | 说明 |
-|---|---|---|
-| apk 包闭包（ICU full） | ≈ 149 MiB | PHP + 扩展 + supervisor + redis + git 等；ICU 数据实际约 31.6 MiB |
-| apk 包闭包（ICU en） | ≈ 120 MiB | 比 full 少约 29 MiB |
-| Caddy 2.11.7 二进制 | 49.5 MiB | 已 strip，官方 release |
-| Alpine base | ≈ 8 MiB | |
-| **合计（未压缩，full / en）** | **≈ 207 / 177 MiB** | `docker images` 口径的估算值 |
+- 含 base 在内共 **109 个包、151.5 MiB**（其中落在闭包里的 base 包 7.5 MiB）；扣掉后新增包在 APKINDEX 中合计 **144.0 MiB**（full，含 `icu-data-en` 2.88 MiB 与 `icu-data-full` 31.57 MiB 的重叠）；en 分支为 **112.4 MiB**。
+- Alpine base 总计约 7.9 MiB；Caddy 2.11.7 二进制 49.5 MiB（官方 release，已 strip、静态链接）。
 
-原镜像（PHP 8.0 / alpine 3.15 / Caddy 38MB）包闭包约 155 MiB，合计约 201 MiB。也就是说：
-**默认 full 与原镜像体积基本持平（约 +6 MiB，主要是新版 Caddy），en 才明显更小（约 −24 MiB）。**
+| 组成 | full | en |
+|---|---:|---:|
+| apk 新增包（不含 base，已扣 ICU 重叠） | ≈ 141.1 MiB | ≈ 112.4 MiB |
+| Alpine base | ≈ 7.9 MiB | ≈ 7.9 MiB |
+| Caddy 2.11.7 二进制 | 49.5 MiB | 49.5 MiB |
+| **合计（未压缩）** | **≈ 198.5 MiB** | **≈ 169.8 MiB** |
+
+原镜像（PHP 8.0 / alpine 3.15 / Caddy 约 38MB）包闭包约 155 MiB，合计约 201 MiB。**默认 full 与原镜像基本持平（约 −2 MiB：Caddy 大了约 11.5 MiB，其余包小了约 14 MiB）；en 约小 31 MiB。**
+
+主要可移除项的边际体积（移除该项及其独占依赖能省多少，各项不可相加）：
+
+| 组件 | 边际体积 | 说明 |
+|---|---:|---|
+| `icu-data-full` | 31.6 MiB | 完整 locale；换 en 后实际省约 29 MiB |
+| supervisor + Python | 28.3 MiB | supervisor 1.5 + python3 22.5 + setuptools/parsing/packaging 4.0 |
+| php84-gd + 图像库 | 18.2 MiB | 其中 AVIF 链（aom/libyuv/dav1d/libavif）约 12，XPM/X11 链约 4.5 |
+| php84-fileinfo | 8.2 MiB | `.so` 内嵌 libmagic 数据库，Composer/文件检测要用 |
+| git | 6.7 MiB | 只有 composer 拉 VCS 源时需要 |
+| redis | 4.2 MiB | Redis server + cli + benchmark |
+| bash / opcache / curl | 1.3 / 1.2 / 0.3 MiB | 兼容脚本、性能、命令行调试 |
+
+> **没有发现“装了但没用到”的包**。显式列表里的 `php84`、`php84-dom`、`php84-session`、`php84-sockets`、`php84-openssl`、`php84-pdo` 是传递依赖，删掉列表项 apk 仍会装，体积 **0 变化**；保留它们是为了让扩展契约显式。`icu-data-en` 同理由 `icu-libs` 自动拉入。
 
 > Alpine 的 `icu-libs` 依赖虚拟包 `icu-data`，默认 provider 是 `icu-data-en`；`icu-data-full` 与 en 安装同一个 `icudt*.dat`，所以 Dockerfile 在 PHP 包之后**最后**装 full，让完整数据覆盖 en 的小文件。两份包记录会同时存在，这是 Alpine 的预期行为；容器内不要 `apk fix` 或重装 `icu-data-en`，否则可能把数据覆盖回 en，升级请重建镜像。
 
@@ -120,13 +155,16 @@ docker build -t lcrp8:php84-slim --build-arg ICU_DATA=en .
 | 方案 | 省（安装后） | 代价 |
 |---|---|---|
 | `ICU_DATA=en` | ≈ 29 MiB | 非英语 locale 数据缺失 |
-| 去掉 supervisor（换 s6/自写 init） | ≈ 26.5 MiB | 丢 `supervisorctl`、`/run/supervisor/*.conf` 外挂能力 |
-| 去掉 git | ≈ 6.8 MiB | 容器内 composer 拉 git 源会失败 |
-| 自编译 gd 关闭 AVIF | ≈ 13.5 MiB | `imageavif()` 失效，且要自维护扩展构建 |
+| 去掉 supervisor（换 s6/tini） | ≈ 28.3 MiB | 丢 `/run/supervisor/*.conf` 外挂、自动重启/重试语义；需要改启动方式 |
+| 去掉 git | ≈ 6.7 MiB | 容器内 composer 拉 git 源会失败 |
+| 自编译 gd 关闭 AVIF | ≈ 12 MiB | `imageavif()` 失效，需自维护扩展构建 |
+| 自编译 gd 关闭 XPM/X11 | ≈ 4.5 MiB | XPM 图像失效，同样要自维护 |
 | 自编译 Caddy 精简模块 | 约 10–20 MiB（未实测） | Caddyfile 兼容性无法保证 |
+| 删 Python `ensurepip`/测试/`pydoc_data`/`config-*` | ≈ 3.3 MiB | 只影响容器内 Python 工具，不影响 supervisor；但文件不在 apk 清单里，`apk verify` 会报缺失 |
+| 删 `py3-setuptools` | ≈ 4.0 MiB | supervisor 4.3 在 Python 3.14 已改用 importlib，但 apk 声明了依赖，删除会造成包依赖不一致 |
 | UPX 压 Caddy | 压缩层显著变小 | 运行时解压内存、杀软误报、审计困难，不建议 |
 
-当前安全裁剪已做：合并配置层、去掉 `/tmp` 中间文件、同层清理 apk 缓存；Alpine 的文档包本就没有安装，PHP/Redis/Git/Caddy 二进制均已 strip，所以**没有剩下的“无损大头”**。
+当前已做的无损裁剪：合并配置层、去掉 `/tmp` 中间文件、同层清理 apk 缓存、Caddy 只取 `/usr/bin/caddy`；Alpine 的文档包本就没有安装，PHP/Redis/Git/Caddy 二进制均已 strip。**剩下的“无损大头”已经没有了**，再往下都是上面这些功能或架构取舍。
 
 ---
 
@@ -197,6 +235,8 @@ PHP 8.0 → 8.2+ 的已知破坏点，上线前在预发跑一遍：
 
 - Caddy 固定次版本；`.github/dependabot.yml` 每周提 PR 跟踪 Caddy 升级。Alpine 版本走 `ALPINE_VERSION` 构建参数，Dependabot 解析不到，需手动改。
 - CI action 固定到 commit SHA，由 Dependabot 更新；不要直接改回浮动 tag。
+- CI 每次把 `github.run_id` 传给 `APK_CACHE_BUST`，强制 apk 层重建；否则 buildx 缓存会让 `apk upgrade` 直接复用旧层，周构建拿不到新包。本地用 `APK_CACHE_BUST=$(date +%s) ./build.sh` 达到同样效果。
+- 手动选择 `php_major=82` 时 CI 自动切到 `ALPINE_VERSION=3.22`；`php85` 在 3.24 没有 `php85-opcache`，构建会告警并在无 OPcache 的情况下继续（83/84 会被 CI 断言必须带 OPcache）。
 - 推送后 CI 会按刚生成的 digest 拉取并断言 PHP 版本、`expose_php`、FPM 配置、扩展列表。
 
 出新 CVE 时的处理顺序：
@@ -225,6 +265,8 @@ PHP 8.0 → 8.2+ 的已知破坏点，上线前在预发跑一遍：
 9. **`session.cookie_httponly=1`**——这是安全默认值；如果老应用依赖 JS 读取 PHPSESSID，需要在应用层覆盖。
 10. **Redis 只绑回环**——其他容器/宿主不能再直连 6379；如原有跨容器依赖，需显式改回并自行加 ACL/密码，不建议。
 11. **`ICU_DATA=en` 的行为差异**——见上文；需要 zh 等 locale 时用默认 full。
+12. **`supervisord` 不是 init**——它只回收自己的子进程，应用产生的孤儿进程可能变僵尸。示例 compose 已加 `init: true`；直接 `docker run` 时请加 `--init`。
+13. **PHP 8.5 无 OPcache**——Alpine v3.24 尚未打包 `php85-opcache`，只有显式选 `PHP_MAJOR=85` 才会遇到；默认 84 与 83 均带 OPcache。
 
 ---
 

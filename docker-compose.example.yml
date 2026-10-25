@@ -8,6 +8,8 @@ services:
         PHP_MAJOR: "84"
         # APK_MIRROR: https://mirrors.aliyun.com/alpine
     restart: always
+    # 让 Docker 的 tini 做 PID 1：回收 supervisord 的孤儿进程，并正确转发停止信号
+    init: true
     # 阻止 setuid 等途径提权（容器本身已以 root 启动，见 README「已知风险」）
     security_opt:
       - no-new-privileges:true

@@ -3,7 +3,9 @@
 #
 #   ./build.sh                      # PHP 8.4 / alpine 3.24 / linux/amd64 / 完整 ICU
 #   PHP_MAJOR=83 ./build.sh         # PHP 8.3
+#   PHP_MAJOR=82 ALPINE_VERSION=3.22 ./build.sh   # PHP 8.2 只在 3.22 仓库里
 #   ICU_DATA=en ./build.sh          # 瘦身：仅 en_US/GB 的 ICU 数据（省约 28.7MiB）
+#   APK_CACHE_BUST=$(date +%s) ./build.sh         # 强制 apk 层重建，拉最新安全更新
 #   APK_MIRROR=https://mirrors.aliyun.com/alpine ./build.sh
 #   PLATFORMS=linux/amd64,linux/arm64 PUSH=1 IMAGE=registry.cn-hangzhou.aliyuncs.com/you/lcrp8 ./build.sh
 #
@@ -16,6 +18,7 @@ PHP_MAJOR=${PHP_MAJOR:-84}
 ALPINE_VERSION=${ALPINE_VERSION:-3.24}
 APK_MIRROR=${APK_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}
 ICU_DATA=${ICU_DATA:-full}
+APK_CACHE_BUST=${APK_CACHE_BUST:-0}
 PLATFORMS=${PLATFORMS:-linux/amd64}
 PUSH=${PUSH:-0}
 TAG=${TAG:-php${PHP_MAJOR}-$(date +%Y%m%d)}
@@ -24,6 +27,10 @@ case "${PHP_MAJOR}" in
   82|83|84|85) ;;
   *) echo "PHP_MAJOR 仅支持 82/83/84/85，收到: ${PHP_MAJOR}" >&2; exit 1 ;;
 esac
+if [[ "${PHP_MAJOR}" == "82" && "${ALPINE_VERSION#v}" != 3.22* ]]; then
+  echo "PHP_MAJOR=82 只能配 ALPINE_VERSION=3.22（3.24 仓库里没有 php82）" >&2
+  exit 1
+fi
 case "${ICU_DATA}" in
   en|full) ;;
   *) echo "ICU_DATA 仅支持 en/full，收到: ${ICU_DATA}" >&2; exit 1 ;;
@@ -47,7 +54,7 @@ case "${PHP_MAJOR}" in
 esac
 MIN_PHP=${MIN_PHP:-$DEFAULT_MIN}
 
-echo "==> ${IMAGE}:${TAG}  (php${PHP_MAJOR} / alpine ${ALPINE_VERSION} / ${PLATFORMS} / ICU ${ICU_DATA})"
+echo "==> ${IMAGE}:${TAG}  (php${PHP_MAJOR} / alpine ${ALPINE_VERSION} / ${PLATFORMS} / ICU ${ICU_DATA} / cache-bust ${APK_CACHE_BUST})"
 echo "==> 版本下限 MIN_PHP=${MIN_PHP:-未设}"
 
 build_args=(
@@ -55,6 +62,7 @@ build_args=(
   --build-arg "ALPINE_VERSION=${ALPINE_VERSION}"
   --build-arg "APK_MIRROR=${APK_MIRROR}"
   --build-arg "ICU_DATA=${ICU_DATA}"
+  --build-arg "APK_CACHE_BUST=${APK_CACHE_BUST}"
 )
 
 if [[ "${PUSH}" == "1" ]]; then
@@ -87,6 +95,16 @@ docker run --rm --platform "${PLATFORMS}" "${IMAGE}:${TAG}" php -r '
     echo "    [OK] PHP 安全默认值生效\n";
 '
 docker run --rm --platform "${PLATFORMS}" "${IMAGE}:${TAG}" php-fpm8 -t
+
+if [[ "${PHP_MAJOR}" != "85" ]]; then
+  echo "==> OPcache 断言"
+  docker run --rm --platform "${PLATFORMS}" "${IMAGE}:${TAG}" php -r '
+      if (!extension_loaded("Zend OPcache")) { fwrite(STDERR, "    [X] OPcache 未加载\n"); exit(1); }
+      echo "    [OK] OPcache 已加载\n";
+  '
+else
+  echo "==> PHP 8.5: 跳过 OPcache 断言（Alpine 3.24 未打包 php85-opcache）"
+fi
 
 echo "==> 冒烟测试"
 docker run --rm --platform "${PLATFORMS}" "${IMAGE}:${TAG}" php -m | tr '\n' ' '; echo

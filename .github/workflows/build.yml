@@ -54,7 +54,8 @@ jobs:
         run: |
           set -eu
           case "${PHP_MAJOR}" in
-            82|83|84|85) ;;
+            82) ALPINE_VERSION=3.22 ;;  # 3.24 仓库没有 php82
+            83|84|85) ALPINE_VERSION=3.24 ;;
             *) echo "unsupported php_major: ${PHP_MAJOR}" >&2; exit 1 ;;
           esac
           case "${ICU_DATA}" in
@@ -62,6 +63,7 @@ jobs:
             *) echo "unsupported icu_data: ${ICU_DATA}" >&2; exit 1 ;;
           esac
           echo "php_major=${PHP_MAJOR}" >> "$GITHUB_OUTPUT"
+          echo "alpine_version=${ALPINE_VERSION}" >> "$GITHUB_OUTPUT"
           echo "icu_data=${ICU_DATA}" >> "$GITHUB_OUTPUT"
 
       - name: Meta
@@ -88,10 +90,12 @@ jobs:
           sbom: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # 每次运行都换 APK_CACHE_BUST，强制重建 apk 层，避免缓存跳过 apk upgrade
           build-args: |
             PHP_MAJOR=${{ steps.vars.outputs.php_major }}
-            ALPINE_VERSION=3.24
+            ALPINE_VERSION=${{ steps.vars.outputs.alpine_version }}
             ICU_DATA=${{ steps.vars.outputs.icu_data }}
+            APK_CACHE_BUST=${{ github.run_id }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -119,6 +123,12 @@ jobs:
           docker run --rm --platform linux/amd64 "$IMG" php -r '
             if (ini_get("expose_php") || ini_get("display_errors")) { exit(1); }
           '
+          if [ "${PHP_MAJOR}" != "85" ]; then
+            # Alpine 3.24 还没打包 php85-opcache；8.3/8.4 必须带 OPcache
+            docker run --rm --platform linux/amd64 "$IMG" php -r '
+              if (!extension_loaded("Zend OPcache")) { exit(1); }
+            '
+          fi
           docker run --rm --platform linux/amd64 "$IMG" php -m
           docker run --rm --platform linux/amd64 "$IMG" php-fpm8 -t
           docker run --rm --platform linux/amd64 "$IMG" php-fpm8 -v
