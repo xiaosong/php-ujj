@@ -3,7 +3,7 @@
 Caddy + PHP-FPM + Redis + Supervisor 的单容器运行时。原 `tokumeikoi/lcrp8`（2023-05 停更、PHP 8.0.25 已 EOL）的自维护替代品。
 
 - 基础镜像 `alpine:3.24`，PHP **8.4.27**（含 CVE-2026-109618 / CVE-2026-109619 修复）
-- Caddy 固定上游 **2.11.7**（`caddy:2.11.7-alpine`，不再跟随浮动的 `:2-alpine`）
+- Caddy 跟随 `caddy:2-alpine`（主版本锁 2，不固定次版本；构建时 `--pull` 取最新 2.x）
 - 目录结构、配置文件、启动命令与原镜像**完全一致**，业务侧无需改动
 - 多架构：`linux/amd64`、`linux/arm64`
 - 默认 `ICU_DATA=full`，与原镜像一样带完整 locale 数据；可用 `ICU_DATA=en` 构建瘦身版
@@ -54,7 +54,7 @@ $ ./build.sh
 
 - **0 个**「安装版本 < 首个修复版本」的已知漏洞。
 - 12 条 secdb 标记为 `0`（无修复/争议）的条目，集中在 `busybox`、`curl`、`git`、`zlib`。其中 zlib 的 CVE-2023-45853 / CVE-2023-6992 属于 minizip（本镜像不提供该可执行文件）；其余条目需按上游公告评估，当前 Alpine 分支没有可用修复包，升级分支或移除对应组件是唯一手段。
-- Caddy 二进制不在 Alpine secdb 覆盖范围内，只能跟随上游 release；当前固定 2.11.7（上游 2026-10-03 发布）。
+- Caddy 二进制不在 Alpine secdb 覆盖范围内，只能跟随上游 release；镜像用 `caddy:2-alpine` 浮动 tag，构建时取最新 2.x，实际版本看 CI 日志里的 `caddy version`。
 
 ### 本次安全加固
 
@@ -64,7 +64,7 @@ $ ./build.sh
 - compose 示例加 `no-new-privileges:true`
 - CI action 全部固定到 commit SHA；手动输入先白名单校验；推送后按 digest 复验；生成 SLSA provenance + SBOM
 - Dockerfile 构建期再次断言 PHP 最低版本（绕过 `build.sh` 直接 `docker build` 也拦得住）
-- Dependabot 每周跟踪 action / 基础镜像升级
+- Dependabot 每周跟踪 CI action 升级；Caddy 由 `caddy:2-alpine` 浮动 tag + 周构建跟进，Alpine 分支手动升级
 
 ---
 
@@ -83,10 +83,12 @@ PLATFORMS=linux/amd64,linux/arm64 PUSH=1 IMAGE=your.registry/lcrp8 ./build.sh
 或者直接：
 
 ```bash
-docker build -t lcrp8:php84 .
-docker build -t lcrp8:php83 --build-arg PHP_MAJOR=83 .
-docker build -t lcrp8:php84-slim --build-arg ICU_DATA=en .
+docker build --pull -t lcrp8:php84 .
+docker build --pull -t lcrp8:php83 --build-arg PHP_MAJOR=83 .
+docker build --pull -t lcrp8:php84-slim --build-arg ICU_DATA=en .
 ```
+
+直接构建时带上 `--pull`，否则 `caddy:2-alpine` 可能复用本地旧缓存。
 
 构建参数：
 
@@ -123,13 +125,13 @@ docker build -t lcrp8:php84-slim --build-arg ICU_DATA=en .
 按 Alpine v3.24 APKINDEX 的 installed-size 实测（2026-10-25）：
 
 - 含 base 在内共 **109 个包、151.5 MiB**（其中落在闭包里的 base 包 7.5 MiB）；扣掉后新增包在 APKINDEX 中合计 **144.0 MiB**（full，含 `icu-data-en` 2.88 MiB 与 `icu-data-full` 31.57 MiB 的重叠）；en 分支为 **112.4 MiB**。
-- Alpine base 总计约 7.9 MiB；Caddy 2.11.7 二进制 49.5 MiB（官方 release，已 strip、静态链接）。
+- Alpine base 总计约 7.9 MiB；Caddy 2.x 二进制当前约 49.5 MiB（2.11.x 实测，官方 release，已 strip、静态链接）。
 
 | 组成 | full | en |
 |---|---:|---:|
 | apk 新增包（不含 base，已扣 ICU 重叠） | ≈ 141.1 MiB | ≈ 112.4 MiB |
 | Alpine base | ≈ 7.9 MiB | ≈ 7.9 MiB |
-| Caddy 2.11.7 二进制 | 49.5 MiB | 49.5 MiB |
+| Caddy 2.x 二进制（当前约 49.5 MiB） | ≈49.5 MiB | ≈49.5 MiB |
 | **合计（未压缩）** | **≈ 198.5 MiB** | **≈ 169.8 MiB** |
 
 原镜像（PHP 8.0 / alpine 3.15 / Caddy 约 38MB）包闭包约 155 MiB，合计约 201 MiB。**默认 full 与原镜像基本持平（约 −2 MiB：Caddy 大了约 11.5 MiB，其余包小了约 14 MiB）；en 约小 31 MiB。**
@@ -233,7 +235,7 @@ PHP 8.0 → 8.2+ 的已知破坏点，上线前在预发跑一遍：
 
 `.github/workflows/build.yml` 已配好：**每周一自动重建并推送 GHCR**（多架构），alpine 的安全更新会自动进来；也支持手动触发并指定 PHP 主版本 / ICU 数据。
 
-- Caddy 固定次版本；`.github/dependabot.yml` 每周提 PR 跟踪 Caddy 升级。Alpine 版本走 `ALPINE_VERSION` 构建参数，Dependabot 解析不到，需手动改。
+- Caddy 用 `caddy:2-alpine` 浮动 tag，构建时 `--pull` 取最新 2.x；每周重建自动跟进安全更新。主版本仍锁 2，避免 v3 的 Caddyfile 不兼容。Alpine 版本走 `ALPINE_VERSION` 构建参数，需手动改。
 - CI action 固定到 commit SHA，由 Dependabot 更新；不要直接改回浮动 tag。
 - CI 每次把 `github.run_id` 传给 `APK_CACHE_BUST`，强制 apk 层重建；否则 buildx 缓存会让 `apk upgrade` 直接复用旧层，周构建拿不到新包。本地用 `APK_CACHE_BUST=$(date +%s) ./build.sh` 达到同样效果。
 - 手动选择 `php_major=82` 时 CI 自动切到 `ALPINE_VERSION=3.22`；`php85` 在 3.24 没有 `php85-opcache`，构建会告警并在无 OPcache 的情况下继续（83/84 会被 CI 断言必须带 OPcache）。
@@ -257,7 +259,7 @@ PHP 8.0 → 8.2+ 的已知破坏点，上线前在预发跑一遍：
 5. **`pm.status_path = /phpfpm_status`**——默认 Caddy 不会把它转给 FPM（`php_fastcgi` 只匹配 `*.php`），但如果 Caddyfile 显式路由了它，会泄露进程/请求信息。对外暴露前加认证或删除该路由。
 6. **`/run/supervisor/supervisord.conf` 可追加 root 程序**——示例 compose 中该挂载默认注释；启用时请加 `:ro`。
 7. **无 HEALTHCHECK**——Caddy 可能只监听 443 且用内部证书，硬加会误报。需要时自行加 `curl -fsS http://127.0.0.1/`。
-8. **Caddy 大版本跨度**——若 Caddyfile 里有已废弃指令，2.11 会启动失败。上线前先验：
+8. **Caddy 小版本滚动**——镜像不固定 Caddy 次版本，若 Caddyfile 里有已废弃指令，升级后的 2.x 会启动失败。上线前先验：
    ```bash
    docker run --rm -v $PWD/Caddyfile:/run/caddy/Caddyfile:ro lcrp8:php84 \
      caddy validate --config /run/caddy/Caddyfile

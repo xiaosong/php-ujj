@@ -8,10 +8,5 @@ updates:
     commit-message:
       prefix: "ci"
 
-  # Caddy 基础镜像（Alpine 走 Dockerfile 里的 ALPINE_VERSION 构建参数，需手动升级）
-  - package-ecosystem: "docker"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-    commit-message:
-      prefix: "deps"
+  # Caddy 使用 caddy:2-alpine 浮动 tag，Alpine 走 ALPINE_VERSION 构建参数，
+  # 两者都没有可被 Dependabot 跟踪的版本号，因此这里不再配置 docker ecosystem。
