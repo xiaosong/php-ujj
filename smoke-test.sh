@@ -18,6 +18,19 @@ case "${ICU_DATA}" in
 esac
 MIN_PHP=${MIN_PHP:-${default_min}}
 
+# 经典 image store 把一个 index digest 只绑定到一个平台，按同一个 index digest
+# 拉第二个平台会报 cannot overwrite digest，所以先解析该平台的子清单 digest。
+if [[ "${image}" == *@sha256:* ]]; then
+  platform_digest=$(docker buildx imagetools inspect "${image}" --format \
+    "{{range .Manifest.Manifests}}{{if .Platform}}{{if eq (printf \"%s/%s\" .Platform.OS .Platform.Architecture) \"${platform}\"}}{{.Digest}}{{end}}{{end}}{{end}}")
+  if [[ ! "${platform_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    echo "Cannot resolve a single ${platform} manifest in ${image}: ${platform_digest}" >&2
+    exit 1
+  fi
+  image="${image%@*}@${platform_digest}"
+  docker pull --platform "${platform}" "${image}"
+fi
+
 echo "==> 验证 ${image} (${platform}, PHP ${PHP_MAJOR}, ICU ${ICU_DATA})"
 # ICU_DATA 是 ICU 自身的数据目录变量，不能用来传递 full/en 测试期望值。
 docker run --rm --platform "${platform}" \

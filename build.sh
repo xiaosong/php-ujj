@@ -89,9 +89,6 @@ else
 fi
 
 for platform in "${platforms[@]}"; do
-  if [[ "${PUSH}" == "1" ]]; then
-    docker pull --platform "${platform}" "${built_image}"
-  fi
   PHP_MAJOR="${PHP_MAJOR}" ICU_DATA="${ICU_DATA}" \
     bash "${script_dir}/smoke-test.sh" "${built_image}" "${platform}"
 done
