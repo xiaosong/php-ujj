@@ -34,6 +34,11 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      tags: ${{ steps.meta.outputs.tags }}
+      php_major: ${{ steps.vars.outputs.php_major }}
+      icu_data: ${{ steps.vars.outputs.icu_data }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -107,22 +112,70 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Test candidate on both platforms
+  # 各架构在原生 runner 上测试：qemu 仿真下 Redis 的 MADV_FREE/fork 内核探测会误判，
+  # 直接 exit 1（ARM64-COW-BUG），无法用来判断镜像本身是否正常。
+  test:
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Login GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Test candidate
         env:
-          PHP_MAJOR: ${{ steps.vars.outputs.php_major }}
-          ICU_DATA: ${{ steps.vars.outputs.icu_data }}
-          DIGEST: ${{ steps.build.outputs.digest }}
+          PHP_MAJOR: ${{ needs.build.outputs.php_major }}
+          ICU_DATA: ${{ needs.build.outputs.icu_data }}
+          DIGEST: ${{ needs.build.outputs.digest }}
+          PLATFORM: ${{ matrix.platform }}
         run: |
           set -euo pipefail
-          for platform in linux/amd64 linux/arm64; do
-            bash smoke-test.sh "${IMAGE}@${DIGEST}" "$platform"
-          done
+          bash smoke-test.sh "${IMAGE}@${DIGEST}" "${PLATFORM}"
+
+  promote:
+    needs: [build, test]
+    # needs 自带 success()：两个架构的测试都通过才会执行
+    if: needs.build.outputs.tags != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Login GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Promote verified image
-        if: steps.meta.outputs.tags != ''
         env:
-          DIGEST: ${{ steps.build.outputs.digest }}
-          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ needs.build.outputs.digest }}
+          TAGS: ${{ needs.build.outputs.tags }}
         run: |
           set -euo pipefail
           tag_args=()

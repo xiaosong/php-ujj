@@ -80,7 +80,7 @@ APK_MIRROR=https://mirrors.aliyun.com/alpine ./build.sh # 国内构建
 PLATFORMS=linux/amd64,linux/arm64 PUSH=1 IMAGE=your.registry/lcrp8 ./build.sh
 ```
 
-`build.sh` 默认单平台本地构建：先生成不带正式标签的镜像，按 image ID 调用共享 `smoke-test.sh`，通过后才打正式标签。`PUSH=1` 则先推送 candidate，按 digest 测试每个目标架构，再用 `imagetools` 提升正式标签；需要可用的 Docker daemon，跨架构运行还需要仿真支持。构建成功不等于发布验证通过。
+`build.sh` 默认单平台本地构建：先生成不带正式标签的镜像，按 image ID 调用共享 `smoke-test.sh`，通过后才打正式标签。`PUSH=1` 则先推送 candidate，按 digest 测试每个目标架构，再用 `imagetools` 提升正式标签；需要可用的 Docker daemon，跨架构运行还需要仿真支持，且异架构下 Redis 的内核探测会误判（见「维护」）。构建成功不等于发布验证通过。
 
 也可直接构建临时镜像（不会自动运行完整冒烟测试或提升正式标签）：
 
@@ -246,11 +246,12 @@ PHP 8.0 → 8.2+ 的已知破坏点，上线前在预发跑一遍：
 - CI action 固定到 commit SHA，由 Dependabot 更新；不要直接改回浮动 tag。
 - CI 每次把 `github.run_id-github.run_attempt` 组成的值传给 `APK_CACHE_BUST`，包括重跑也强制 apk 层重建；否则 buildx 缓存会让 `apk upgrade` 直接复用旧层，周构建拿不到新包。本地用 `APK_CACHE_BUST=$(date +%s) ./build.sh` 达到同样效果。
 - 手动选择 `php_major=82` 时 CI 自动切到 `ALPINE_VERSION=3.22`；PHP 8.5 内建 OPcache，仅不安装独立包，所有支持分支都必须通过 OPcache 检查。
-- 发布先构建并推送唯一 candidate 标签，再按 digest 遍历 `linux/amd64`、`linux/arm64` 运行共享 `smoke-test.sh`；全部通过后才用 `imagetools` 将同一产物提升为正式标签，产物摘要记录 digest。测试失败不更新正式标签。
+- 发布分三个 job：`build` 推送唯一 candidate 标签并输出 digest/tags，`test` 按架构矩阵在**原生 runner**（amd64 `ubuntu-latest`、arm64 `ubuntu-24.04-arm`）运行共享 `smoke-test.sh`，`promote` 需要两者都成功才用 `imagetools` 将同一产物提升为正式标签，产物摘要记录 digest。测试失败不更新正式标签。
+- 测试不用 qemu 跑异架构：仿真下 Redis 的 `MADV_FREE`+fork 内核探测会误判成 `ARM64-COW-BUG` 并 `exit 1`，无法反映镜像本身是否正常。该保护对真实受影响内核有效，**不要往镜像里加 `ignore-warnings`**。
 - `smoke-test.sh` 收到 `image@digest` 时先解析该平台的子清单 digest 再拉取测试：经典 image store 只把一个 index digest 绑定到单个平台，直接拉第二个平台会报 `cannot overwrite digest`。提升正式标签仍用多架构 index digest。
 - 共享测试验证 PHP 版本及主版本、全部约定扩展、OPcache（含 8.5）、安全默认值和 ICU locale；以原 CMD 完整启动 Caddy/FPM/Redis/cron，检查静态与 PHP HTTP 请求、Redis PING、额外挂载测试任务及容器退出。这不替代现网队列和应用的预发验证。
 - 标签区分 ICU：full 保持 `php84` / `php84-YYYYMMDD`；en 使用 `php84-en` / `php84-en-YYYYMMDD`，其他 PHP 分支同理。CI 仅允许默认分支更新这些标签，`latest` 还限定 PHP84/full；推送 `v*` Git 标签只发布对应版本号，不更新上述滚动标签。其他分支或在 Git 标签上手动运行时只构建并测试 candidate，不发布正式标签；本地构建不更新 `latest`。
-- 本地 `PUSH=1` 同样先按 digest 测试目标架构再提升标签，不能只依赖远端构建器：本机需要 Docker daemon，非本机架构需要跨架构仿真。默认本地单平台构建也必须测试通过才打正式标签。
+- 本地 `PUSH=1` 同样先按 digest 测试目标架构再提升标签，不能只依赖远端构建器：本机需要 Docker daemon，非本机架构需要跨架构仿真。异架构测试会撞上上面那条 Redis 探测误判，多架构发布请走 CI 或原生 arm64 机器。默认本地单平台构建也必须测试通过才打正式标签。
 
 出新 CVE 时的处理顺序：
 
