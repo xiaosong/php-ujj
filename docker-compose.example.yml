@@ -1,14 +1,10 @@
-# 与原始 tokumeikoi/lcrp8 的目录约定一致，换镜像时只改 image 一行即可
+# 保留原始 tokumeikoi/lcrp8 的目录约定；迁移前需验证配置与应用兼容性
+# 内层 Caddy 仅监听 :80，提供静态文件和 PHP，不需要证书卷
 services:
   lcrp8:
-    image: lcrp8:php84
-    build:
-      context: .
-      args:
-        PHP_MAJOR: "84"
-        # APK_MIRROR: https://mirrors.aliyun.com/alpine
+    image: ghcr.io/xiaosong/php-ujj:php84
     restart: always
-    # 让 Docker 的 tini 做 PID 1：回收 supervisord 的孤儿进程，并正确转发停止信号
+    # 为容器提供独立的 PID 1 init
     init: true
     # 阻止 setuid 等途径提权（容器本身已以 root 启动，见 README「已知风险」）
     security_opt:
@@ -20,8 +16,8 @@ services:
       - ./www:/www                                  # 站点代码
       - ./wwwlogs:/wwwlogs                          # php-fpm / slow 日志
       - ./Caddyfile:/run/caddy/Caddyfile:ro         # Caddy 配置（原镜像就是从这读的）
-      # - ./supervisord.d:/run/supervisor           # 追加 supervisord 程序
-      # - ./php.ini:/etc/php84/php.ini:ro           # 注意：新版路径是 /etc/php84，不是 /etc/php8
+      # - ./supervisord.d:/run/supervisor:ro        # 仅加载其中的 supervisord.conf
+      # - ./php.ini:/etc/php84/php.ini:ro           # 建议挂载到所选 PHP 的实际版本路径
       # - /etc/localtime:/etc/localtime:ro
     ulimits:
       nofile: 50000

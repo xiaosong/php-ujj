@@ -5,10 +5,15 @@
 *.log
 .DS_Store
 .env
+.env.*
+!.env.example
+!.env.*.example
+php.ini
 
 # 构建不需要的运行时/本地文件，避免进入构建上下文
 docker-compose*.yml
 build.sh
+smoke-test.sh
 www
 wwwlogs
 Caddyfile

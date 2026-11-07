@@ -21,7 +21,6 @@ ICU_DATA=${ICU_DATA:-full}
 APK_CACHE_BUST=${APK_CACHE_BUST:-0}
 PLATFORMS=${PLATFORMS:-linux/amd64}
 PUSH=${PUSH:-0}
-TAG=${TAG:-php${PHP_MAJOR}-$(date +%Y%m%d)}
 
 case "${PHP_MAJOR}" in
   82|83|84|85) ;;
@@ -32,7 +31,8 @@ if [[ "${PHP_MAJOR}" == "82" && "${ALPINE_VERSION#v}" != 3.22* ]]; then
   exit 1
 fi
 case "${ICU_DATA}" in
-  en|full) ;;
+  full) variant="php${PHP_MAJOR}" ;;
+  en) variant="php${PHP_MAJOR}-en" ;;
   *) echo "ICU_DATA 仅支持 en/full，收到: ${ICU_DATA}" >&2; exit 1 ;;
 esac
 case "${PUSH}" in
@@ -40,22 +40,24 @@ case "${PUSH}" in
   *) echo "PUSH 仅支持 0/1，收到: ${PUSH}" >&2; exit 1 ;;
 esac
 if [[ "${PLATFORMS}" == *,* && "${PUSH}" != "1" ]]; then
-  echo "多架构构建必须 PUSH=1（buildx 无法把多架构镜像 --load 进本地 daemon）" >&2
+  echo "多架构构建必须 PUSH=1" >&2
   exit 1
 fi
-
-# CVE-2026-109618 / CVE-2026-109619（php2shell）的官方修复线
-case "${PHP_MAJOR}" in
-  82) DEFAULT_MIN=8.2.35 ;;
-  83) DEFAULT_MIN=8.3.36 ;;
-  84) DEFAULT_MIN=8.4.27 ;;
-  85) DEFAULT_MIN=8.5.12 ;;
-  *)  DEFAULT_MIN=0 ;;
-esac
-MIN_PHP=${MIN_PHP:-$DEFAULT_MIN}
+IFS=',' read -r -a platforms <<< "${PLATFORMS}"
+for platform in "${platforms[@]}"; do
+  case "${platform}" in
+    linux/amd64|linux/arm64) ;;
+    *) echo "PLATFORMS 仅支持 linux/amd64、linux/arm64" >&2; exit 1 ;;
+  esac
+done
+if [[ "${PLATFORMS}" == *, ]]; then
+  echo "PLATFORMS 不能以逗号结尾" >&2
+  exit 1
+fi
+TAG=${TAG:-${variant}-$(date +%Y%m%d)}
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
 echo "==> ${IMAGE}:${TAG}  (php${PHP_MAJOR} / alpine ${ALPINE_VERSION} / ${PLATFORMS} / ICU ${ICU_DATA} / cache-bust ${APK_CACHE_BUST})"
-echo "==> 版本下限 MIN_PHP=${MIN_PHP:-未设}"
 
 build_args=(
   --build-arg "PHP_MAJOR=${PHP_MAJOR}"
@@ -65,49 +67,40 @@ build_args=(
   --build-arg "APK_CACHE_BUST=${APK_CACHE_BUST}"
 )
 
+workdir=$(mktemp -d)
+trap 'rm -rf "${workdir}"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 if [[ "${PUSH}" == "1" ]]; then
+  candidate="${IMAGE}:candidate-${variant}-$(date +%s)-$$-${RANDOM}"
   docker buildx build --pull --platform "${PLATFORMS}" "${build_args[@]}" \
-    -t "${IMAGE}:${TAG}" -t "${IMAGE}:php${PHP_MAJOR}" --push .
-  echo "==> 已推送，跳过本地冒烟（到目标机 docker run 再验）"
-  exit 0
-fi
-
-docker build --pull --platform "${PLATFORMS}" "${build_args[@]}" \
-  -t "${IMAGE}:${TAG}" -t "${IMAGE}:php${PHP_MAJOR}" .
-
-echo "==> 版本断言"
-docker run --rm --platform "${PLATFORMS}" -e MIN_PHP="${MIN_PHP}" "${IMAGE}:${TAG}" php -r '
-    $min = getenv("MIN_PHP");
-    printf("    实际 PHP 版本: %s   下限: %s\n", PHP_VERSION, $min === "" ? "未设" : $min);
-    if ($min !== "" && version_compare(PHP_VERSION, $min, "<")) {
-        fwrite(STDERR, "    [X] 低于修复线，拒绝交付\n");
-        exit(1);
-    }
-    echo "    [OK] 已越过 CVE-2026-109618 / CVE-2026-109619 修复线\n";
-'
-
-echo "==> 安全配置断言"
-docker run --rm --platform "${PLATFORMS}" "${IMAGE}:${TAG}" php -r '
-    if (ini_get("expose_php")) { fwrite(STDERR, "    [X] expose_php 未关闭\n"); exit(1); }
-    if (ini_get("display_errors")) { fwrite(STDERR, "    [X] display_errors 未关闭\n"); exit(1); }
-    printf("    expose_php=%s display_errors=%s session.cookie_httponly=%s\n",
-        ini_get("expose_php"), ini_get("display_errors"), ini_get("session.cookie_httponly"));
-    echo "    [OK] PHP 安全默认值生效\n";
-'
-docker run --rm --platform "${PLATFORMS}" "${IMAGE}:${TAG}" php-fpm8 -t
-
-if [[ "${PHP_MAJOR}" != "85" ]]; then
-  echo "==> OPcache 断言"
-  docker run --rm --platform "${PLATFORMS}" "${IMAGE}:${TAG}" php -r '
-      if (!extension_loaded("Zend OPcache")) { fwrite(STDERR, "    [X] OPcache 未加载\n"); exit(1); }
-      echo "    [OK] OPcache 已加载\n";
-  '
+    --provenance=true --sbom=true -t "${candidate}" --push "${script_dir}"
+  digest=$(docker buildx imagetools inspect "${candidate}" --format '{{.Manifest.Digest}}')
+  if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    echo "无法读取候选镜像 digest" >&2
+    exit 1
+  fi
+  built_image="${IMAGE}@${digest}"
 else
-  echo "==> PHP 8.5: 跳过 OPcache 断言（Alpine 3.24 未打包 php85-opcache）"
+  docker build --pull --platform "${PLATFORMS}" "${build_args[@]}" \
+    --iidfile "${workdir}/image-id" "${script_dir}"
+  built_image=$(<"${workdir}/image-id")
 fi
 
-echo "==> 冒烟测试"
-docker run --rm --platform "${PLATFORMS}" "${IMAGE}:${TAG}" php -m | tr '\n' ' '; echo
-docker run --rm --platform "${PLATFORMS}" "${IMAGE}:${TAG}" sh -c 'php-fpm8 -v | head -1; caddy version'
+for platform in "${platforms[@]}"; do
+  if [[ "${PUSH}" == "1" ]]; then
+    docker pull --platform "${platform}" "${built_image}"
+  fi
+  PHP_MAJOR="${PHP_MAJOR}" ICU_DATA="${ICU_DATA}" \
+    bash "${script_dir}/smoke-test.sh" "${built_image}" "${platform}"
+done
 
-echo "==> done: ${IMAGE}:${TAG}"
+if [[ "${PUSH}" == "1" ]]; then
+  docker buildx imagetools create -t "${IMAGE}:${TAG}" -t "${IMAGE}:${variant}" "${built_image}"
+  echo "==> 已验证并发布: ${built_image}"
+else
+  docker tag "${built_image}" "${IMAGE}:${TAG}"
+  docker tag "${built_image}" "${IMAGE}:${variant}"
+fi
+echo "==> done: ${IMAGE}:${TAG} / ${IMAGE}:${variant}"

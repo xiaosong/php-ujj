@@ -10,3 +10,7 @@ supervisord.d/
 # 本地配置（从 example 复制，可能含主机路径/密钥）
 docker-compose.yml
 .env
+.env.*
+!.env.example
+!.env.*.example
+/php.ini

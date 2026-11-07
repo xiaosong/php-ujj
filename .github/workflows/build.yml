@@ -23,6 +23,10 @@ on:
 env:
   IMAGE: ghcr.io/${{ github.repository }}
 
+concurrency:
+  group: image-${{ github.repository }}-${{ github.ref }}-${{ inputs.php_major || '84' }}-${{ inputs.icu_data || 'full' }}
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -59,25 +63,29 @@ jobs:
             *) echo "unsupported php_major: ${PHP_MAJOR}" >&2; exit 1 ;;
           esac
           case "${ICU_DATA}" in
-            en|full) ;;
+            full) VARIANT="php${PHP_MAJOR}" ;;
+            en) VARIANT="php${PHP_MAJOR}-en" ;;
             *) echo "unsupported icu_data: ${ICU_DATA}" >&2; exit 1 ;;
           esac
           echo "php_major=${PHP_MAJOR}" >> "$GITHUB_OUTPUT"
           echo "alpine_version=${ALPINE_VERSION}" >> "$GITHUB_OUTPUT"
           echo "icu_data=${ICU_DATA}" >> "$GITHUB_OUTPUT"
+          echo "variant=${VARIANT}" >> "$GITHUB_OUTPUT"
 
       - name: Meta
         id: meta
+        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
         uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
           images: ${{ env.IMAGE }}
+          flavor: latest=false
           tags: |
-            type=raw,value=php${{ steps.vars.outputs.php_major }}
-            type=raw,value=php${{ steps.vars.outputs.php_major }}-{{date 'YYYYMMDD'}}
-            type=ref,event=tag
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ steps.vars.outputs.variant }},enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+            type=raw,value=${{ steps.vars.outputs.variant }}-{{date 'YYYYMMDD'}},enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+            type=ref,event=tag,enable=${{ github.event_name == 'push' }}
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.vars.outputs.variant == 'php84' }}
 
-      - name: Build & push
+      - name: Build candidate
         id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
@@ -88,48 +96,44 @@ jobs:
           # 生成 SLSA provenance 与 SBOM，随镜像一起推到 GHCR
           provenance: true
           sbom: true
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: ${{ env.IMAGE }}:candidate-${{ github.run_id }}-${{ github.run_attempt }}
           labels: ${{ steps.meta.outputs.labels }}
-          # 每次运行都换 APK_CACHE_BUST，强制重建 apk 层，避免缓存跳过 apk upgrade
+          # 重跑也刷新 apk 层，避免复用旧的安全更新结果
           build-args: |
             PHP_MAJOR=${{ steps.vars.outputs.php_major }}
             ALPINE_VERSION=${{ steps.vars.outputs.alpine_version }}
             ICU_DATA=${{ steps.vars.outputs.icu_data }}
-            APK_CACHE_BUST=${{ github.run_id }}
+            APK_CACHE_BUST=${{ github.run_id }}-${{ github.run_attempt }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # 版本断言 + 安全默认值断言：验最终推送的那个 digest，避免 tag 竞态
-      - name: Assert PHP version and hardening
+      - name: Test candidate on both platforms
         env:
           PHP_MAJOR: ${{ steps.vars.outputs.php_major }}
+          ICU_DATA: ${{ steps.vars.outputs.icu_data }}
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          set -eux
-          case "${PHP_MAJOR}" in
-            82) MIN=8.2.35 ;;
-            83) MIN=8.3.36 ;;
-            84) MIN=8.4.27 ;;
-            85) MIN=8.5.12 ;;
-            *)  MIN=0 ;;
-          esac
-          IMG="${IMAGE}@${DIGEST}"
-          docker pull --platform linux/amd64 "$IMG"
-          docker run --rm --platform linux/amd64 -e MIN_PHP="${MIN}" "$IMG" php -r '
-            $min = getenv("MIN_PHP");
-            printf("PHP %s (need >= %s)\n", PHP_VERSION, $min ?: "-");
-            if ($min !== "" && version_compare(PHP_VERSION, $min, "<")) { exit(1); }
-          '
-          docker run --rm --platform linux/amd64 "$IMG" php -r '
-            if (ini_get("expose_php") || ini_get("display_errors")) { exit(1); }
-          '
-          if [ "${PHP_MAJOR}" != "85" ]; then
-            # Alpine 3.24 还没打包 php85-opcache；8.3/8.4 必须带 OPcache
-            docker run --rm --platform linux/amd64 "$IMG" php -r '
-              if (!extension_loaded("Zend OPcache")) { exit(1); }
-            '
-          fi
-          docker run --rm --platform linux/amd64 "$IMG" php -m
-          docker run --rm --platform linux/amd64 "$IMG" php-fpm8 -t
-          docker run --rm --platform linux/amd64 "$IMG" php-fpm8 -v
-          docker run --rm --platform linux/amd64 "$IMG" caddy version
+          set -euo pipefail
+          for platform in linux/amd64 linux/arm64; do
+            docker pull --platform "$platform" "${IMAGE}@${DIGEST}"
+            bash smoke-test.sh "${IMAGE}@${DIGEST}" "$platform"
+          done
+
+      - name: Promote verified image
+        if: steps.meta.outputs.tags != ''
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          tag_args=()
+          while IFS= read -r tag; do
+            if [ -n "$tag" ]; then
+              tag_args+=(-t "$tag")
+            fi
+          done <<< "$TAGS"
+          docker buildx imagetools create "${tag_args[@]}" "${IMAGE}@${DIGEST}"
+          {
+            printf '## Verified image\n\n`%s@%s`\n\n' "$IMAGE" "$DIGEST"
+            printf 'Tags:\n```text\n%s\n```\n' "$TAGS"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -43,13 +43,13 @@ ARG APK_MIRROR=https://dl-cdn.alpinelinux.org/alpine
 # full：与原镜像一致的完整 ICU 数据（含 zh 等 locale，约 31.6MiB）
 # en  ：仅 en_US/GB，省约 28.7MiB，但非英语 locale 的 intl 排序/格式会退化
 ARG ICU_DATA=full
-# CI 每次传入新的 run_id，强制 apk 层重建，避免 buildx cache 跳过安全更新；
+# CI 传入 run_id-run_attempt，避免重跑时缓存跳过 apk 安全更新；
 # 本地默认 0 保留缓存，需要刷新时传 APK_CACHE_BUST=$(date +%s)
 ARG APK_CACHE_BUST=0
 
 LABEL org.opencontainers.image.title="lcrp8" \
       org.opencontainers.image.description="Caddy + PHP-FPM + Redis + Supervisor (LCRP stack), rebuilt from tokumeikoi/lcrp8" \
-      org.opencontainers.image.source="https://github.com/tokumeikoi/lcrp" \
+      org.opencontainers.image.source="https://github.com/xiaosong/php-ujj" \
       org.opencontainers.image.licenses="MIT"
 
 # 1) 显式写死仓库地址（community 里才有 php8x 包），顺带支持国内镜像源
@@ -58,7 +58,7 @@ LABEL org.opencontainers.image.title="lcrp8" \
 #      - php8-zlib  → 新版 Alpine 已把 zlib 编进 php 主程序，无此独立包
 #      - php8-json  → PHP 8 起 json 恒定内置，无此独立包
 #      - php8-redis → 改名为 php8x-pecl-redis
-# 4) 构建期拒绝未知 PHP 主版本 / ICU 选项；82 只能配 Alpine 3.22，85 在 3.24 无 opcache
+# 4) 构建期拒绝未知 PHP 主版本 / ICU 选项；82 只能配 Alpine 3.22，85 内建 OPcache
 # 5) ICU full 必须在最后装：php8x-intl 会先按 provider_priority 拉入 en 数据，
 #    再装 full 才能让完整的 icudt*.dat 覆盖掉 en 的小文件（Alpine 官方推荐做法）
 RUN set -eux; \
@@ -117,7 +117,7 @@ RUN set -eux; \
         php${PHP_MAJOR}-xmlwriter \
         php${PHP_MAJOR}-zip; \
     case "${PHP_MAJOR}" in \
-        85) echo "WARNING: php85-opcache is not packaged in Alpine ${ALPINE_VERSION}; building without OPcache" >&2 ;; \
+        85) : ;; \
         *)  apk add --no-cache "php${PHP_MAJOR}-opcache" ;; \
     esac; \
     case "${ICU_DATA}" in \
@@ -153,6 +153,10 @@ RUN set -eux; \
     MIN_PHP="${min}" php -r ' \
         if (version_compare(PHP_VERSION, getenv("MIN_PHP"), "<")) { \
             fwrite(STDERR, "PHP " . PHP_VERSION . " < " . getenv("MIN_PHP") . ", refusing to build\n"); \
+            exit(1); \
+        } \
+        if (!extension_loaded("Zend OPcache")) { \
+            fwrite(STDERR, "OPcache is not loaded\n"); \
             exit(1); \
         } \
         echo "PHP " . PHP_VERSION . " >= " . getenv("MIN_PHP") . "\n"; \

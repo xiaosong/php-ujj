@@ -4,10 +4,10 @@ Caddy + PHP-FPM + Redis + Supervisor 的单容器运行时。原 `tokumeikoi/lcr
 
 - 基础镜像 `alpine:3.24`，PHP **8.4.27**（含 CVE-2026-109618 / CVE-2026-109619 修复）
 - Caddy 跟随 `caddy:2-alpine`（主版本锁 2，不固定次版本；构建时 `--pull` 取最新 2.x）
-- 目录结构、配置文件、启动命令与原镜像**完全一致**，业务侧无需改动
+- 保留原镜像的目录、配置和启动约定，迁移前仍需验证应用、挂载权限和配置兼容性
 - 多架构：`linux/amd64`、`linux/arm64`
 - 默认 `ICU_DATA=full`，与原镜像一样带完整 locale 数据；可用 `ICU_DATA=en` 构建瘦身版
-- `PHP_MAJOR` 支持 `82`（必须配 `ALPINE_VERSION=3.22`）/ `83` / `84` / `85`；3.24 的 php85 尚无 opcache 包，构建会告警并跳过
+- `PHP_MAJOR` 支持 `82`（必须配 `ALPINE_VERSION=3.22`）/ `83` / `84` / `85`；PHP 8.5 内建 OPcache，仅不安装独立 `php85-opcache` 包
 
 ---
 
@@ -20,7 +20,7 @@ Caddy + PHP-FPM + Redis + Supervisor 的单容器运行时。原 `tokumeikoi/lcr
 |---|---|---|---|
 | **8.4（默认）** | `php84 8.4.27-r0` | 8.4.27 | ✅ 等于修复版 |
 | 8.3 | `php83 8.3.36-r0` | 8.3.36 | ✅ 等于修复版 |
-| 8.5（可选） | `php85 8.5.12-r0` | 8.5.12 | ✅ 等于修复版；⚠️ v3.24 未打包 `php85-opcache` |
+| 8.5（可选） | `php85 8.5.12-r0` | 8.5.12 | ✅ 等于修复版；OPcache 内建，无需独立包 |
 | 8.2（需 `ALPINE_VERSION=3.22`） | `php82 8.2.35-r0` | 8.2.35 | ✅ 等于修复版；CI 会自动切到 3.22 |
 
 四路互证（2026-10-25 核对）：
@@ -62,7 +62,7 @@ $ ./build.sh
 - Redis 显式 `--bind 127.0.0.1 -::1 --protected-mode yes`，不再可能监听外部地址
 - php-fpm unix socket 显式 `listen.mode = 0660`
 - compose 示例加 `no-new-privileges:true`
-- CI action 全部固定到 commit SHA；手动输入先白名单校验；推送后按 digest 复验；生成 SLSA provenance + SBOM
+- CI action 全部固定到 commit SHA；手动输入先白名单校验；candidate 按 digest 逐架构测试通过后才提升正式标签；生成 SLSA provenance + SBOM
 - Dockerfile 构建期再次断言 PHP 最低版本（绕过 `build.sh` 直接 `docker build` 也拦得住）
 - Dependabot 每周跟踪 CI action 升级；Caddy 由 `caddy:2-alpine` 浮动 tag + 周构建跟进，Alpine 分支手动升级
 
@@ -80,15 +80,17 @@ APK_MIRROR=https://mirrors.aliyun.com/alpine ./build.sh # 国内构建
 PLATFORMS=linux/amd64,linux/arm64 PUSH=1 IMAGE=your.registry/lcrp8 ./build.sh
 ```
 
-或者直接：
+`build.sh` 默认单平台本地构建：先生成不带正式标签的镜像，按 image ID 调用共享 `smoke-test.sh`，通过后才打正式标签。`PUSH=1` 则先推送 candidate，按 digest 测试每个目标架构，再用 `imagetools` 提升正式标签；需要可用的 Docker daemon，跨架构运行还需要仿真支持。构建成功不等于发布验证通过。
+
+也可直接构建临时镜像（不会自动运行完整冒烟测试或提升正式标签）：
 
 ```bash
-docker build --pull -t lcrp8:php84 .
-docker build --pull -t lcrp8:php83 --build-arg PHP_MAJOR=83 .
-docker build --pull -t lcrp8:php84-slim --build-arg ICU_DATA=en .
+docker build --pull -t lcrp8:local-php84 .
+docker build --pull -t lcrp8:local-php83 --build-arg PHP_MAJOR=83 .
+docker build --pull -t lcrp8:local-php84-en --build-arg ICU_DATA=en .
 ```
 
-直接构建时带上 `--pull`，否则 `caddy:2-alpine` 可能复用本地旧缓存。
+直接构建时带上 `--pull`，否则 `caddy:2-alpine` 可能复用本地旧缓存；刷新 apk 层另需 `--build-arg APK_CACHE_BUST=$(date +%s)`。
 
 构建参数：
 
@@ -98,7 +100,7 @@ docker build --pull -t lcrp8:php84-slim --build-arg ICU_DATA=en .
 | `ALPINE_VERSION` | `3.24` | 换分支时注意该分支的 php 版本是否已修复漏洞；CI 对 82 自动用 3.22 |
 | `APK_MIRROR` | `https://dl-cdn.alpinelinux.org/alpine` | 国内可换阿里云 / 中科大 |
 | `ICU_DATA` | `full` | `full`：完整 ICU 数据（31.6 MiB，含 zh 等）；`en`：仅 en_US/GB（2.9 MiB） |
-| `APK_CACHE_BUST` | `0` | 任意变化值都会让 apk 层缓存失效；CI 每次传 `run_id`，本地刷新传时间戳 |
+| `APK_CACHE_BUST` | `0` | 任意变化值都会让 apk 层缓存失效；CI 每次传 `run_id-run_attempt`（含重跑），本地刷新传时间戳 |
 
 > `ICU_DATA` 不是可有可无的优化项：原 Alpine 3.15 的 `icu-libs` 自带完整数据，3.16 起拆成 `icu-data-en` / `icu-data-full`。选 `en` 时 `IntlDateFormatter('zh_CN')`、`Collator('zh')` 等会退化到根 locale，**默认 full 是为了保持与原镜像一致的行为**。
 
@@ -106,23 +108,25 @@ docker build --pull -t lcrp8:php84-slim --build-arg ICU_DATA=en .
 
 ## 架构
 
-当前镜像刻意保持原镜像的“单容器多进程”形态：`supervisord` 作为 PID 1，拉起 `php-fpm`、`caddy`、`redis`、`crond` 四个进程。这样 `Caddyfile`、`/run/supervisor/*.conf`、`/www`、`/wwwlogs`、`/tmp/php-cgi.sock` 和启动命令都与原镜像一致，换镜像只改 tag。
+当前镜像刻意保持原镜像的“单容器多进程”形态：`supervisord` 拉起 `php-fpm`、`caddy`、`redis`、`crond` 四个进程，未启用独立 init 时作为 PID 1。保留 `Caddyfile`、`/run/supervisor/supervisord.conf`、`/www`、`/wwwlogs`、`/tmp/php-cgi.sock` 和启动约定；附加程序只加载固定的 `/run/supervisor/supervisord.conf`，不是该目录下任意 `*.conf`。
 
-合理的地方：迁移成本为零，不需要拆 compose，老机器/老运维习惯不变。
+合理的地方：不需要为了换镜像拆 compose，保留现有运维方式；但 PHP 升级、权限和配置仍需预发验证，不承诺零迁移成本。
 
-不合理的地方（新部署需要知道）：
+部署拓扑：**客户端 HTTPS → 外层 Caddy（管理证书）→ 内层 Caddy `:80`（静态文件 + PHP-FPM）**。内层不终止 TLS，不需要证书卷；保留内层 Caddy、Supervisor 和默认完整 ICU。现网还外挂上述 Supervisor 配置，管理两个 `queue:work` 和一个 Horizon。
 
-- 四个进程共享同一内存、网络和生命周期；Redis 重启会连带 Web 一起重启，无法独立扩缩容。
+需要知道的限制：
+
+- 进程共享容器资源和网络，无法独立扩缩容；Supervisor 单独重启 Redis 不会连带重启 Web，但容器重启会影响全部进程。
 - 进程全部是 root；一个 PHP 应用 RCE 就是容器 root（见「已知风险」）。
 - 多副本部署时 cron 会重复执行，Redis 也各自独立。
-- `supervisord` 本身不是 init，孤儿子进程可能变僵尸；示例 compose 已加 `init: true`，不用 compose 时请加 `--init`。
-- supervisor + Python 运行时约 28.3 MiB，是单容器方案的主要“管理税”。
+- 示例 compose 的 `init: true` 提供独立 PID 1；不用 compose 时可加 `--init`。
+- supervisor + Python 运行时约 28.3 MiB（静态估算），是单容器方案的主要管理开销。
 
 结论：**如果目标是替换原镜像，这个架构是合理的，不建议为省体积拆掉 supervisor**。新项目建议拆成 caddy / php-fpm / redis / cron 四个服务，Redis 独立持久化并加 ACL，cron 单独跑一个副本；那时镜像可以去掉 supervisor、redis、crond 以及整条 Python 依赖。
 
 ## 体积
 
-按 Alpine v3.24 APKINDEX 的 installed-size 实测（2026-10-25）：
+按 Alpine v3.24 APKINDEX 的 installed-size 静态估算（2026-10-25），以下包闭包与合计数字不是 Docker 镜像实测大小，也不代表压缩后拉取体积：
 
 - 含 base 在内共 **109 个包、151.5 MiB**（其中落在闭包里的 base 包 7.5 MiB）；扣掉后新增包在 APKINDEX 中合计 **144.0 MiB**（full，含 `icu-data-en` 2.88 MiB 与 `icu-data-full` 31.57 MiB 的重叠）；en 分支为 **112.4 MiB**。
 - Alpine base 总计约 7.9 MiB；Caddy 2.x 二进制当前约 49.5 MiB（2.11.x 实测，官方 release，已 strip、静态链接）。
@@ -157,7 +161,7 @@ docker build --pull -t lcrp8:php84-slim --build-arg ICU_DATA=en .
 | 方案 | 省（安装后） | 代价 |
 |---|---|---|
 | `ICU_DATA=en` | ≈ 29 MiB | 非英语 locale 数据缺失 |
-| 去掉 supervisor（换 s6/tini） | ≈ 28.3 MiB | 丢 `/run/supervisor/*.conf` 外挂、自动重启/重试语义；需要改启动方式 |
+| 去掉 supervisor（换 s6/tini） | ≈ 28.3 MiB | 丢 `/run/supervisor/supervisord.conf` 外挂、自动重启/重试语义；需要改启动方式 |
 | 去掉 git | ≈ 6.7 MiB | 容器内 composer 拉 git 源会失败 |
 | 自编译 gd 关闭 AVIF | ≈ 12 MiB | `imageavif()` 失效，需自维护扩展构建 |
 | 自编译 gd 关闭 XPM/X11 | ≈ 4.5 MiB | XPM 图像失效，同样要自维护 |
@@ -174,23 +178,26 @@ docker build --pull -t lcrp8:php84-slim --build-arg ICU_DATA=en .
 
 ```bash
 cp docker-compose.example.yml docker-compose.yml
-docker compose up -d
+docker compose pull
+docker compose up -d --no-build
 ```
 
-镜像内的约定（**与原镜像一致，别改**）：
+此 compose 示例直接使用远程镜像 `ghcr.io/xiaosong/php-ujj:php84`，不在部署机器构建。端口保持原来的 `80:80`、`443:443`，默认绑定宿主机所有地址，不预设外层 Caddy 的部署位置；内层实际仍按 Caddyfile 仅监听 `:80`。
+
+镜像内保留的路径约定：
 
 ```
 /www                          代码目录（WORKDIR，外挂）
 /wwwlogs                      php-fpm.log / php-slow.log（外挂）
 /run/caddy/Caddyfile          Caddy 配置（外挂）
-/run/supervisor/*.conf        supervisord 附加程序（外挂，建议只读挂载）
+/run/supervisor/supervisord.conf  supervisord 附加程序（固定文件，建议只读挂载）
 /etc/php84/php-fpm.d/www.conf FPM 配置（镜像内）
 /tmp/php-cgi.sock             FPM socket，Caddy 反代目标
 ```
 
 进程树：`supervisord → php-fpm8 -RF / caddy run --config /run/caddy/Caddyfile / redis-server（仅 127.0.0.1） / crond -f`
 
-端口：`80`、`443`。
+镜像声明端口：`80`、`443`；上述拓扑的内层 Caddy 实际仅监听 `:80`，声明端口不等于监听或发布端口。现有 Caddy 访问日志已配置轮转，其余后台日志仍需按实际用途配置轮转。
 
 ### 兼容层
 
@@ -205,7 +212,7 @@ docker compose up -d
 
 所以老 `supervisord.conf` 里的 `php-fpm8 -RF`、crontab 里的 `php8 artisan`、运维脚本里的 `/etc/php8/...` 都照旧能用。
 
-> 唯一要注意：**挂 `php.ini` 请挂到 `/etc/php84/php.ini`**，挂 `/etc/php8/php.ini` 会被软链绕过去。
+> 挂载 `php.ini` 建议使用所选 PHP 的实际版本路径，例如默认版本用 `/etc/php84/php.ini`，避免依赖兼容软链；升级 PHP 主版本时同步核对挂载路径。
 
 ---
 
@@ -237,38 +244,47 @@ PHP 8.0 → 8.2+ 的已知破坏点，上线前在预发跑一遍：
 
 - Caddy 用 `caddy:2-alpine` 浮动 tag，构建时 `--pull` 取最新 2.x；每周重建自动跟进安全更新。主版本仍锁 2，避免 v3 的 Caddyfile 不兼容。Alpine 版本走 `ALPINE_VERSION` 构建参数，需手动改。
 - CI action 固定到 commit SHA，由 Dependabot 更新；不要直接改回浮动 tag。
-- CI 每次把 `github.run_id` 传给 `APK_CACHE_BUST`，强制 apk 层重建；否则 buildx 缓存会让 `apk upgrade` 直接复用旧层，周构建拿不到新包。本地用 `APK_CACHE_BUST=$(date +%s) ./build.sh` 达到同样效果。
-- 手动选择 `php_major=82` 时 CI 自动切到 `ALPINE_VERSION=3.22`；`php85` 在 3.24 没有 `php85-opcache`，构建会告警并在无 OPcache 的情况下继续（83/84 会被 CI 断言必须带 OPcache）。
-- 推送后 CI 会按刚生成的 digest 拉取并断言 PHP 版本、`expose_php`、FPM 配置、扩展列表。
+- CI 每次把 `github.run_id-github.run_attempt` 组成的值传给 `APK_CACHE_BUST`，包括重跑也强制 apk 层重建；否则 buildx 缓存会让 `apk upgrade` 直接复用旧层，周构建拿不到新包。本地用 `APK_CACHE_BUST=$(date +%s) ./build.sh` 达到同样效果。
+- 手动选择 `php_major=82` 时 CI 自动切到 `ALPINE_VERSION=3.22`；PHP 8.5 内建 OPcache，仅不安装独立包，所有支持分支都必须通过 OPcache 检查。
+- 发布先构建并推送唯一 candidate 标签，再按 digest 遍历 `linux/amd64`、`linux/arm64` 运行共享 `smoke-test.sh`；全部通过后才用 `imagetools` 将同一产物提升为正式标签，产物摘要记录 digest。测试失败不更新正式标签。
+- 共享测试验证 PHP 版本及主版本、全部约定扩展、OPcache（含 8.5）、安全默认值和 ICU locale；以原 CMD 完整启动 Caddy/FPM/Redis/cron，检查静态与 PHP HTTP 请求、Redis PING、额外挂载测试任务及容器退出。这不替代现网队列和应用的预发验证。
+- 标签区分 ICU：full 保持 `php84` / `php84-YYYYMMDD`；en 使用 `php84-en` / `php84-en-YYYYMMDD`，其他 PHP 分支同理。CI 仅允许默认分支更新这些标签，`latest` 还限定 PHP84/full；推送 `v*` Git 标签只发布对应版本号，不更新上述滚动标签。其他分支或在 Git 标签上手动运行时只构建并测试 candidate，不发布正式标签；本地构建不更新 `latest`。
+- 本地 `PUSH=1` 同样先按 digest 测试目标架构再提升标签，不能只依赖远端构建器：本机需要 Docker daemon，非本机架构需要跨架构仿真。默认本地单平台构建也必须测试通过才打正式标签。
 
 出新 CVE 时的处理顺序：
 
 1. 查官方修复版本 → 确认 Alpine 对应分支的包是否已跟进（`https://pkgs.alpinelinux.org/packages?name=php84`）
 2. 改 `ALPINE_VERSION` 或 `PHP_MAJOR`，跑 `./build.sh`
-3. 冒烟测试会打印 `php -v`、`php -m`、FPM 配置测试和安全默认值，确认版本越过修复线
-4. 保留旧 tag，回滚只需改 image tag
+3. 等待共享冒烟测试在目标架构全部通过，确认版本越过修复线，并在预发验证实际 Caddy/队列配置与应用
+4. 上线前保存上一版 `image@sha256:...`、对应配置和数据备份；回滚优先使用已验证 digest。日期标签便于追踪，但同日重建可覆盖，不能代替 digest；数据库迁移、队列状态等需单独评估回滚兼容性
 
 ---
 
 ## 已知风险
 
 1. **php-fpm 以 root 运行**（`config/php-fpm.conf` 里 `user = root`）——一旦 RCE 即容器 root。改成 `www-data` 需同时处理 `/www`、`/wwwlogs` 的挂载权限，属于行为变更，未默认做。
-2. **容器以 root 启动**——为与原镜像行为一致而保留；80/443 绑定也需要。`no-new-privileges` 只能阻止再提权，不能把 root 变成非 root。
-3. **`pm.max_children = 300`**——小机器上被打满就是 OOM。按 `可用内存 / 单进程常驻` 重算。
-4. **Caddy admin API 默认监听 `127.0.0.1:2019` 且无认证**——应用侧 RCE 后可改 Caddy 配置、读证书。Caddyfile 由外挂提供，镜像内无法统一关闭；不需要动态配置时在 Caddyfile 顶部加 `{ admin off }`。
+2. **容器以 root 启动**——为与原镜像行为一致而保留。`no-new-privileges` 只能阻止再提权，不能把 root 变成非 root。非 root 迁移需验证挂载、socket、日志、cron 及端口权限，不能只改 `user`。
+3. **`pm.max_children = 300`**——小机器上高并发有 OOM 风险。内存限额与 FPM 并发应结合单进程实测内存、队列/Horizon、Redis 等总开销压测确定；本次不擅自调整。
+4. **Caddy admin API 默认监听 `127.0.0.1:2019` 且无认证**——应用侧 RCE 后可改内层 Caddy 配置；本部署证书由外层管理，不挂入容器。Caddyfile 由外挂提供，镜像内无法统一关闭；不需要动态配置时在 Caddyfile 顶部加 `{ admin off }`。
 5. **`pm.status_path = /phpfpm_status`**——默认 Caddy 不会把它转给 FPM（`php_fastcgi` 只匹配 `*.php`），但如果 Caddyfile 显式路由了它，会泄露进程/请求信息。对外暴露前加认证或删除该路由。
 6. **`/run/supervisor/supervisord.conf` 可追加 root 程序**——示例 compose 中该挂载默认注释；启用时请加 `:ro`。
-7. **无 HEALTHCHECK**——Caddy 可能只监听 443 且用内部证书，硬加会误报。需要时自行加 `curl -fsS http://127.0.0.1/`。
+7. **无 HEALTHCHECK**——不能仅看容器存活；应监测内层 HTTP/PHP、Redis、Supervisor 程序状态和队列处理是否正常，并配置告警。`restart: always` 不会因 `unhealthy` 自动重启容器。
 8. **Caddy 小版本滚动**——镜像不固定 Caddy 次版本，若 Caddyfile 里有已废弃指令，升级后的 2.x 会启动失败。上线前先验：
    ```bash
-   docker run --rm -v $PWD/Caddyfile:/run/caddy/Caddyfile:ro lcrp8:php84 \
+   docker run --rm -v $PWD/Caddyfile:/run/caddy/Caddyfile:ro ghcr.io/xiaosong/php-ujj:php84 \
      caddy validate --config /run/caddy/Caddyfile
    ```
 9. **`session.cookie_httponly=1`**——这是安全默认值；如果老应用依赖 JS 读取 PHPSESSID，需要在应用层覆盖。
 10. **Redis 只绑回环**——其他容器/宿主不能再直连 6379；如原有跨容器依赖，需显式改回并自行加 ACL/密码，不建议。
 11. **`ICU_DATA=en` 的行为差异**——见上文；需要 zh 等 locale 时用默认 full。
-12. **`supervisord` 不是 init**——它只回收自己的子进程，应用产生的孤儿进程可能变僵尸。示例 compose 已加 `init: true`；直接 `docker run` 时请加 `--init`。
-13. **PHP 8.5 无 OPcache**——Alpine v3.24 尚未打包 `php85-opcache`，只有显式选 `PHP_MAJOR=85` 才会遇到；默认 84 与 83 均带 OPcache。
+12. **独立 PID 1**——示例 compose 已加 `init: true`；直接 `docker run` 时可加 `--init`，不替代 Supervisor 的程序管理。
+
+### 生产队列与日志注意事项
+
+- 若两个 `queue:work` 或 Horizon 连接内置 Redis，当前 `--save '' --appendonly no` 会在 Redis/容器重启时丢失队列等数据。生产队列应使用配置了持久化、可靠存储及备份的 Redis，**仅挂数据卷不能启用持久化**；本次不修改 Redis 部署。
+- 现网两个 `startretries=0` 应改为有限启动重试（例如 `10`），仍需对启动失败和异常退出告警；重试次数不是健康保障。本次仅给出建议，不改外挂配置。
+- Supervisor 的 `stopwaitsecs` 应大于最长任务运行时间并留余量；容器 `stop_grace_period` 还应更长，覆盖完整停机流程。按实际任务验证，不照抄固定超时。
+- 现有 Caddy 日志已轮转；FPM、Supervisor、两个 worker、Horizon 和应用日志应按实际输出位置、大小及保留需求配置轮转，避免后台日志填满磁盘。
 
 ---
 
@@ -288,6 +304,7 @@ MIT，见 [LICENSE](LICENSE)。
 │   ├── php-hardening.ini
 │   └── supervisord.conf
 ├── build.sh
+├── smoke-test.sh
 ├── docker-compose.example.yml
 ├── LICENSE
 ├── .dockerignore
