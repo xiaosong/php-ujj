@@ -40,9 +40,15 @@ docker run --rm --platform "${platform}" \
         !ini_get("session.cookie_httponly") || !ini_get("opcache.enable")) {
         fwrite(STDERR, "Unexpected PHP configuration\n"); exit(1);
     }
-    $hasChinese = in_array("zh", ResourceBundle::getLocales(""), true);
-    if ($hasChinese !== (getenv("ICU_DATA") === "full")) {
-        fwrite(STDERR, "ICU locale data does not match the requested variant\n"); exit(1);
+    foreach (["en_US" => true, "zh_CN" => getenv("ICU_DATA") === "full"] as $requestedLocale => $expected) {
+        $formatter = IntlDateFormatter::create($requestedLocale, IntlDateFormatter::FULL,
+            IntlDateFormatter::NONE, "UTC");
+        $actualLocale = $formatter === null ? false : $formatter->getLocale(Locale::ACTUAL_LOCALE);
+        if ($actualLocale === false ||
+            (Locale::getPrimaryLanguage($actualLocale) === Locale::getPrimaryLanguage($requestedLocale)) !== $expected) {
+            fwrite(STDERR, "Unexpected ICU locale for $requestedLocale: " . var_export($actualLocale, true) . "\n");
+            exit(1);
+        }
     }
     printf("PHP %s: extensions, OPcache, hardening and ICU OK\n", PHP_VERSION);
   '
