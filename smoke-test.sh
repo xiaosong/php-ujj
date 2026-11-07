@@ -19,8 +19,9 @@ esac
 MIN_PHP=${MIN_PHP:-${default_min}}
 
 echo "==> 验证 ${image} (${platform}, PHP ${PHP_MAJOR}, ICU ${ICU_DATA})"
+# ICU_DATA 是 ICU 自身的数据目录变量，不能用来传递 full/en 测试期望值。
 docker run --rm --platform "${platform}" \
-  -e MIN_PHP="${MIN_PHP}" -e PHP_MAJOR="${PHP_MAJOR}" -e ICU_DATA="${ICU_DATA}" \
+  -e MIN_PHP="${MIN_PHP}" -e PHP_MAJOR="${PHP_MAJOR}" -e EXPECTED_ICU_DATA="${ICU_DATA}" \
   "${image}" php -r '
     if (PHP_MAJOR_VERSION . PHP_MINOR_VERSION !== getenv("PHP_MAJOR") ||
         version_compare(PHP_VERSION, getenv("MIN_PHP"), "<")) {
@@ -40,13 +41,15 @@ docker run --rm --platform "${platform}" \
         !ini_get("session.cookie_httponly") || !ini_get("opcache.enable")) {
         fwrite(STDERR, "Unexpected PHP configuration\n"); exit(1);
     }
-    foreach (["en_US" => true, "zh_CN" => getenv("ICU_DATA") === "full"] as $requestedLocale => $expected) {
+    foreach (["en_US" => true, "zh_CN" => getenv("EXPECTED_ICU_DATA") === "full"] as $requestedLocale => $expected) {
         $formatter = IntlDateFormatter::create($requestedLocale, IntlDateFormatter::FULL,
             IntlDateFormatter::NONE, "UTC");
         $actualLocale = $formatter === null ? false : $formatter->getLocale(Locale::ACTUAL_LOCALE);
         if ($actualLocale === false ||
             (Locale::getPrimaryLanguage($actualLocale) === Locale::getPrimaryLanguage($requestedLocale)) !== $expected) {
-            fwrite(STDERR, "Unexpected ICU locale for $requestedLocale: " . var_export($actualLocale, true) . "\n");
+            $error = $formatter === null ? "create: " . intl_get_error_message()
+                : "getLocale: " . $formatter->getErrorMessage();
+            fwrite(STDERR, "Unexpected ICU locale for $requestedLocale: " . var_export($actualLocale, true) . "; " . $error . "\n");
             exit(1);
         }
     }
