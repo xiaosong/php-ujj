@@ -6,10 +6,10 @@ platform=${2:?Usage: bash smoke-test.sh IMAGE PLATFORM}
 PHP_MAJOR=${PHP_MAJOR:-84}
 ICU_DATA=${ICU_DATA:-full}
 case "${PHP_MAJOR}" in
-  82) default_min=8.2.35 ;;
-  83) default_min=8.3.36 ;;
-  84) default_min=8.4.27 ;;
-  85) default_min=8.5.12 ;;
+  82) default_min=8.2.36 ;;
+  83) default_min=8.3.37 ;;
+  84) default_min=8.4.28 ;;
+  85) default_min=8.5.13 ;;
   *) echo "Unsupported PHP_MAJOR: ${PHP_MAJOR}" >&2; exit 1 ;;
 esac
 case "${ICU_DATA}" in

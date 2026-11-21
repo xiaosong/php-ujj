@@ -2,7 +2,7 @@
 
 Caddy + PHP-FPM + Redis + Supervisor 的单容器运行时。原 `tokumeikoi/lcrp8`（2023-05 停更、PHP 8.0.25 已 EOL）的自维护替代品。
 
-- 基础镜像 `alpine:3.24`，PHP **8.4.27**（含 CVE-2026-109618 / CVE-2026-109619 修复）
+- 基础镜像 `alpine:3.24`，PHP **8.4.28**（含 2026-11-19 紧急安全版修复，见下）
 - Caddy 跟随 `caddy:2-alpine`（主版本锁 2，不固定次版本；构建时 `--pull` 取最新 2.x）
 - 保留原镜像的目录、配置和启动约定，迁移前仍需验证应用、挂载权限和配置兼容性
 - 多架构：`linux/amd64`、`linux/arm64`
@@ -13,22 +13,28 @@ Caddy + PHP-FPM + Redis + Supervisor 的单容器运行时。原 `tokumeikoi/lcr
 
 ## 漏洞修复状态：已核对确认
 
-`CVE-2026-109618` / `CVE-2026-109619`（php2shell，PHP 核心 RCE，CVSS 4.0 = 9.2）官方修复线：
-**8.2.35 / 8.3.36 / 8.4.27 / 8.5.12**，低于这些版本一律中招。
+PHP 官方 2026-11-19 紧急发版，7 项 CVSS 4.0 = 9.2 的漏洞，命中面集中在 **PHP-FPM 与 session**：
+`CVE-2026-129289`（FPM 未读完请求体 → 请求走私）、`CVE-2026-129291`（FPM epoll UAF → 本地提权）、
+`CVE-2026-129292`（FPM status 页 XSS）、`CVE-2026-126714` / `CVE-2026-115560`（session 文件覆盖 / 序列化器不匹配 → RCE）、
+`CVE-2026-129481`（session 中断关闭 UAF），另有 `CVE-2026-129496`（date 时区缓存 UAF → RCE）、
+`CVE-2026-129501`（DOM 序列化 double free）、`CVE-2026-128090`（PHAR 签名绕过）。
 
-| 分支 | Alpine v3.24 实际包版本 | 修复线 | 结论 |
+官方修复线：**8.2.36 / 8.3.37 / 8.4.28 / 8.5.13**，低于这些版本一律中招。
+（上一轮 2026-10-21 的 `CVE-2026-109618` / `CVE-2026-109619`，php2shell 核心 RCE，修复线 8.4.27，已被本轮覆盖。）
+
+| 分支 | Alpine 实际包版本 | 修复线 | 结论 |
 |---|---|---|---|
-| **8.4（默认）** | `php84 8.4.27-r0` | 8.4.27 | ✅ 等于修复版 |
-| 8.3 | `php83 8.3.36-r0` | 8.3.36 | ✅ 等于修复版 |
-| 8.5（可选） | `php85 8.5.12-r0` | 8.5.12 | ✅ 等于修复版；OPcache 内建，无需独立包 |
-| 8.2（需 `ALPINE_VERSION=3.22`） | `php82 8.2.35-r0` | 8.2.35 | ✅ 等于修复版；CI 会自动切到 3.22 |
+| **8.4（默认）** | v3.24 `php84 8.4.28-r0` | 8.4.28 | ✅ 等于修复版 |
+| 8.3 | v3.24 `php83 8.3.37-r0` | 8.3.37 | ✅ 等于修复版 |
+| 8.5（可选） | v3.24 `php85 8.5.13-r0` | 8.5.13 | ✅ 等于修复版；OPcache 内建，无需独立包 |
+| 8.2（需 `ALPINE_VERSION=3.22`） | v3.22 `php82 8.2.35-r0` | 8.2.36 | ❌ **无修复来源**：v3.22 的 community 已冻结，8.2.36 不会再入库，`php82` 变体等于永久停发（版本断言会拦下） |
 
-四路互证（2026-10-25 核对）：
+四路互证（2026-11-21 核对）：
 
-1. **php.net 官方公告**：8.4.27 于 2026-10-21 发布，正文写明 "security release fixing two critical vulnerabilities (CVE-2026-109618, CVE-2026-109619)… updating is the only safe choice"。
-2. **Alpine aports 源码**（`3.24-stable/community/php84/APKBUILD`）：`pkgver=8.4.27`、`pkgrel=0`、源码直取 `php-8.4.27.tar.xz`——即直接用上游修复版，没有额外本地补丁。
-3. **打包时间**：pkgs.alpinelinux.org 显示 v3.24 的 php84 构建于 **2026-10-21 16:38**，与上游发版同日。
-4. **仓库实时索引**：v3.24 community 的 php84 主包 + 63 个扩展包全部为 `8.4.27-r0`（另有一个 pecl 包走自己的版本号）。
+1. **php.net 官方 ChangeLog**：`Version 8.4.28`（2026-11-19）逐条列出上述 CVE 及对应 GHSA 编号。
+2. **Alpine 官方索引**：`v3.24/community` 的 `php84` 主包 = `8.4.28-r0`，`php84-fpm` / `php84-intl` 同版本。
+3. **国内镜像同步情况**：`mirrors.aliyun.com` 与 `mirrors.ustc.edu.cn` 的 v3.24 community 均已同步 `php84 8.4.28-r0`，换 `APK_MIRROR` 构建同样拿得到修复版。
+4. **Alpine 分支冻结实测**：官方 policy 是 community 只维护到下一个稳定版，实测成立——`v3.22` 与 `v3.23` 的 community 仍停在上一轮（`php84 8.4.27-r0`），只有 `v3.24` 拿到 `8.4.28-r0`。**`ALPINE_VERSION` 落后就等于 PHP 断更**，这也是 v3.22 的 `php82` 停在 `8.2.35-r0`、8.2.36 永远不会进来的原因。下限提到 `8.2.36` 后 8.2 变体会构建失败——这是有意的，宁可不发货，也别发带 FPM/session RCE 的镜像。
 
 自己复核一条命令：
 
@@ -37,24 +43,43 @@ curl -s https://dl-cdn.alpinelinux.org/alpine/v3.24/community/x86_64/APKINDEX.ta
   | tar -xzO APKINDEX | grep -A2 '^P:php84$'
 ```
 
-构建脚本和 Dockerfile 都内置版本断言，低于修复线直接失败：
+构建期下限断言由 Dockerfile 打印，低于修复线直接非 0 退出、镜像发不出去：
 
 ```
-$ ./build.sh
-==> 版本断言
-    实际 PHP 版本: 8.4.27   下限: 8.4.27
-    [OK] 已越过 CVE-2026-109618 / CVE-2026-109619 修复线
+PHP 8.4.28 >= 8.4.28
 ```
 
-> 一个坑：Alpine 的 secdb（`secdb.alpinelinux.org/v3.24/community.json`）目前**还没**把这两个 CVE 标到 php84 条目上（最后记录停在 8.4.9），属数据库同步滞后。v3.22 的 php82 条目已标注 `8.2.35-r0: [CVE-2026-109618, CVE-2026-109619]`，可作旁证。**判断以包版本为准，别以 secdb 为准。**
+`smoke-test.sh` 会对发布出来的镜像用同一条下限再断言一次，并检查 OPcache 已加载。
 
-### Alpine 包扫描（2026-10-25）
+> 一个坑：Alpine 的 secdb 同步滞后——2026-11-21 复查 `security.alpinelinux.org/avail-glants/v3.24/php84` 仍返回空（最后记录停在 8.4.9），漏洞扫描器可能报不出这批 CVE。**判断以 APKINDEX 的包版本为准，别以 secdb 为准。**
+
+### Alpine 包扫描（2026-10-25，PHP 部分以 2026-11-19 修复线为准）
 
 按 `secdb.alpinelinux.org/v3.24/{main,community}.json` 对镜像的完整包闭包逐包比对：
 
 - **0 个**「安装版本 < 首个修复版本」的已知漏洞。
 - 12 条 secdb 标记为 `0`（无修复/争议）的条目，集中在 `busybox`、`curl`、`git`、`zlib`。其中 zlib 的 CVE-2023-45853 / CVE-2023-6992 属于 minizip（本镜像不提供该可执行文件）；其余条目需按上游公告评估，当前 Alpine 分支没有可用修复包，升级分支或移除对应组件是唯一手段。
 - Caddy 二进制不在 Alpine secdb 覆盖范围内，只能跟随上游 release；镜像用 `caddy:2-alpine` 浮动 tag，构建时取最新 2.x，实际版本看 CI 日志里的 `caddy version`。
+
+### Alpine 分支要不要跟着升
+
+`ALPINE_VERSION` 落后不是版本洁癖，而是 **PHP 安全更新会直接断供**：Alpine 的 community 仓库只维护到下一个稳定版发布为止，而 PHP 全在 community。2026-11-21 实测：
+
+| 分支 | 官方支持 | community 的 php84 | 结论 |
+|---|---|---|---|
+| v3.22 | 至 2027-05-01，**仅 main** | `8.4.27-r0`（冻结） | ❌ PHP 不再更新；`php82` 停在 `8.2.35-r0` |
+| v3.23 | 至 2027-11-01，**仅 main** | `8.4.27-r0`（冻结） | ❌ 同上 |
+| **v3.24** | 至 2028-06-01，main + community（latest-stable = 3.24.4） | **`8.4.28-r0`** | ✅ 本仓库默认，本轮修复只在这里 |
+| v3.25 | 官方分支表里还没有 | `community/*/APKINDEX.tar.gz` **404**，main 里 0 个 php 包 | ❌ 现在切过去 `apk add php8x-*` 直接失败 |
+
+Alpine 每年 5 月和 11 月从 edge 切分支，v3.25 一旦正式发布，v3.24 的 community 就会进入冻结——**必须在那一轮切分支**，否则 PHP 修复停止送达。切之前用这条命令确认 community 已就绪：
+
+```bash
+curl -s https://dl-cdn.alpinelinux.org/alpine/v3.25/community/x86_64/APKINDEX.tar.gz \
+  | tar -xzO APKINDEX 2>/dev/null | grep -A2 '^P:php84$'
+```
+
+能返回包版本才改 Dockerfile / build.sh / CI 的默认 `ALPINE_VERSION`。变体延续情况看 edge：目前 edge community 带 `php83 8.3.37` / `php84 8.4.28` / `php85 8.5.13`，**没有 `php82`**——所以 8.2 线随 v3.22 的 community 一起结束，别指望以后还能构建 `PHP_MAJOR=82`。
 
 ### 本次安全加固
 
@@ -231,10 +256,10 @@ PHP 8.0 → 8.2+ 的已知破坏点，上线前在预发跑一遍：
 |---|---|
 | Laravel 11 / 12 | `84`（默认），8.4 安全支持到 2028-12 |
 | Laravel 10 | `83`，8.3 安全支持到 2027-12 |
-| Laravel 9 及更早 | `82`（需把 `ALPINE_VERSION` 设成 `3.22`，那里 php82 = 8.2.35 已修复）——**8.2 于 2026-12-31 EOL**，只剩两个月，尽快排期升框架 |
+| Laravel 9 及更早 | **别用 `82`**：v3.22 的 community 已冻结，`php82` 停在 `8.2.35-r0`，2026-11-19 这批 CVE 没有修复包可装；edge 里已无 php82。且 **8.2 于 2026-12-31 EOL**——升框架，或至少升到 `83` |
 | 其他 PHP 应用 | 取「框架支持上限」与「已修复版本」的交集 |
 
-已修复版本线：8.2.35 / 8.3.36 / 8.4.27 / 8.5.12，低于这些的都会中招。
+已修复版本线：8.2.36 / 8.3.37 / 8.4.28 / 8.5.13，低于这些的都会中招。
 
 ---
 

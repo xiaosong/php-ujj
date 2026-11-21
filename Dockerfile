@@ -144,10 +144,10 @@ RUN set -eux; \
     ln -sf "/usr/sbin/php-fpm${PHP_MAJOR}" /usr/local/bin/php-fpm8; \
     ln -sf "/usr/bin/php${PHP_MAJOR}" /usr/local/bin/php; \
     case "${PHP_MAJOR}" in \
-        82) min=8.2.35 ;; \
-        83) min=8.3.36 ;; \
-        84) min=8.4.27 ;; \
-        85) min=8.5.12 ;; \
+        82) min=8.2.36 ;; \
+        83) min=8.3.37 ;; \
+        84) min=8.4.28 ;; \
+        85) min=8.5.13 ;; \
         *)  min=0 ;; \
     esac; \
     MIN_PHP="${min}" php -r ' \
