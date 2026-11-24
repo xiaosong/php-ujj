@@ -7,7 +7,7 @@ Caddy + PHP-FPM + Redis + Supervisor 的单容器运行时。原 `tokumeikoi/lcr
 - 保留原镜像的目录、配置和启动约定，迁移前仍需验证应用、挂载权限和配置兼容性
 - 多架构：`linux/amd64`、`linux/arm64`
 - 默认 `ICU_DATA=full`，与原镜像一样带完整 locale 数据；可用 `ICU_DATA=en` 构建瘦身版
-- `PHP_MAJOR` 支持 `82`（必须配 `ALPINE_VERSION=3.22`）/ `83` / `84` / `85`；PHP 8.5 内建 OPcache，仅不安装独立 `php85-opcache` 包
+- `PHP_MAJOR` 支持 `83` / `84` / `85`；PHP 8.5 内建 OPcache，仅不安装独立 `php85-opcache` 包（`82` 见下方停发说明）
 
 ---
 
@@ -51,7 +51,7 @@ PHP 8.4.28 >= 8.4.28
 
 `smoke-test.sh` 会对发布出来的镜像用同一条下限再断言一次，并检查 OPcache 已加载。
 
-> 一个坑：Alpine 的 secdb 同步滞后——2026-11-21 复查 `security.alpinelinux.org/avail-glants/v3.24/php84` 仍返回空（最后记录停在 8.4.9），漏洞扫描器可能报不出这批 CVE。**判断以 APKINDEX 的包版本为准，别以 secdb 为准。**
+> 一个坑：Alpine 的 secdb 同步滞后——2026-11-21 复查 `security.alpinelinux.org` 上 `v3.24` 的 `php84` 记录仍停在 8.4.9，漏洞扫描器可能报不出这批 CVE。**判断以 APKINDEX 的包版本为准，别以 secdb 为准。**
 
 ### Alpine 包扫描（2026-10-25，PHP 部分以 2026-11-19 修复线为准）
 
@@ -99,7 +99,6 @@ curl -s https://dl-cdn.alpinelinux.org/alpine/v3.25/community/x86_64/APKINDEX.ta
 ./build.sh                                              # php8.4 / alpine 3.24 / amd64 / ICU full
 ICU_DATA=en ./build.sh                                  # 瘦身：仅 en_US/GB ICU 数据
 PHP_MAJOR=83 ./build.sh                                 # 换 PHP 版本
-PHP_MAJOR=82 ALPINE_VERSION=3.22 ./build.sh             # 8.2 只在 3.22 仓库里
 APK_CACHE_BUST=$(date +%s) ./build.sh                   # 强制刷新 apk 包，不吃层缓存
 APK_MIRROR=https://mirrors.aliyun.com/alpine ./build.sh # 国内构建
 PLATFORMS=linux/amd64,linux/arm64 PUSH=1 IMAGE=your.registry/lcrp8 ./build.sh
@@ -121,8 +120,8 @@ docker build --pull -t lcrp8:local-php84-en --build-arg ICU_DATA=en .
 
 | ARG | 默认 | 说明 |
 |---|---|---|
-| `PHP_MAJOR` | `84` | `84` / `83` / `82` / `85`；`82` 必须配 `ALPINE_VERSION=3.22` |
-| `ALPINE_VERSION` | `3.24` | 换分支时注意该分支的 php 版本是否已修复漏洞；CI 对 82 自动用 3.22 |
+| `PHP_MAJOR` | `84` | `84` / `83` / `85` |
+| `ALPINE_VERSION` | `3.24` | 换分支时注意该分支的 php 版本是否已修复漏洞 |
 | `APK_MIRROR` | `https://dl-cdn.alpinelinux.org/alpine` | 国内可换阿里云 / 中科大 |
 | `ICU_DATA` | `full` | `full`：完整 ICU 数据（31.6 MiB，含 zh 等）；`en`：仅 en_US/GB（2.9 MiB） |
 | `APK_CACHE_BUST` | `0` | 任意变化值都会让 apk 层缓存失效；CI 每次传 `run_id-run_attempt`（含重跑），本地刷新传时间戳 |
@@ -231,9 +230,9 @@ docker compose up -d --no-build
 | 路径 | 指向 |
 |---|---|
 | `/etc/php8` | `/etc/php84` |
-| `php8` | `/usr/bin/php84` |
-| `php-fpm8` | `/usr/sbin/php-fpm84` |
-| `php` | `/usr/bin/php84` |
+| `/usr/bin/php8` | `/usr/bin/php84` |
+| `/usr/sbin/php-fpm8` | `/usr/sbin/php-fpm84` |
+| `/usr/bin/php` | `/usr/bin/php84` |
 
 所以老 `supervisord.conf` 里的 `php-fpm8 -RF`、crontab 里的 `php8 artisan`、运维脚本里的 `/etc/php8/...` 都照旧能用。
 
@@ -269,9 +268,9 @@ PHP 8.0 → 8.2+ 的已知破坏点，上线前在预发跑一遍：
 
 - Caddy 用 `caddy:2-alpine` 浮动 tag，构建时 `--pull` 取最新 2.x；每周重建自动跟进安全更新。主版本仍锁 2，避免 v3 的 Caddyfile 不兼容。Alpine 版本走 `ALPINE_VERSION` 构建参数，需手动改。
 - CI action 固定到 commit SHA，由 Dependabot 更新；不要直接改回浮动 tag。
-- CI 每次把 `github.run_id-github.run_attempt` 组成的值传给 `APK_CACHE_BUST`，包括重跑也强制 apk 层重建；否则 buildx 缓存会让 `apk upgrade` 直接复用旧层，周构建拿不到新包。本地用 `APK_CACHE_BUST=$(date +%s) ./build.sh` 达到同样效果。
-- 手动选择 `php_major=82` 时 CI 自动切到 `ALPINE_VERSION=3.22`；PHP 8.5 内建 OPcache，仅不安装独立包，所有支持分支都必须通过 OPcache 检查。
-- 发布分三个 job：`build` 推送唯一 candidate 标签并输出 digest/tags，`test` 按架构矩阵在**原生 runner**（amd64 `ubuntu-latest`、arm64 `ubuntu-24.04-arm`）运行共享 `smoke-test.sh`，`promote` 需要两者都成功才用 `imagetools` 将同一产物提升为正式标签，产物摘要记录 digest。测试失败不更新正式标签。
+- CI 每次把 `github.run_id-github.run_attempt` 组成的值传给 `APK_CACHE_BUST`，包括重跑也强制 apk 层重建；否则 buildx 缓存会让 `apk upgrade` 直接复用旧层，周构建拿不到新包（CI 也因此不启用无收益的 GHA 层缓存）。本地用 `APK_CACHE_BUST=$(date +%s) ./build.sh` 达到同样效果。
+- PHP 8.5 内建 OPcache，仅不安装独立包，所有支持分支都必须通过 OPcache 检查；最低版本线统一维护在 [`config/php-min-versions.env`](config/php-min-versions.env)。
+- 发布分三个 job：`build` 推送固定名称的 `candidate-<variant>` 标签并输出 image/digest/tags，`test` 按架构矩阵在**原生 runner**（amd64 `ubuntu-latest`、arm64 `ubuntu-24.04-arm`）运行共享 `smoke-test.sh`，`promote` 需要两者都成功才用 `imagetools` 将同一产物提升为正式标签，产物摘要记录 digest。测试失败不更新正式标签。
 - 测试不用 qemu 跑异架构：仿真下 Redis 的 `MADV_FREE`+fork 内核探测会误判成 `ARM64-COW-BUG` 并 `exit 1`，无法反映镜像本身是否正常。该保护对真实受影响内核有效，**不要往镜像里加 `ignore-warnings`**。
 - `smoke-test.sh` 收到 `image@digest` 时先解析该平台的子清单 digest 再拉取测试：经典 image store 只把一个 index digest 绑定到单个平台，直接拉第二个平台会报 `cannot overwrite digest`。提升正式标签仍用多架构 index digest。
 - 共享测试验证 PHP 版本及主版本、全部约定扩展、OPcache（含 8.5）、安全默认值和 ICU locale；以原 CMD 完整启动 Caddy/FPM/Redis/cron，检查静态与 PHP HTTP 请求、Redis PING、额外挂载测试任务及容器退出。这不替代现网队列和应用的预发验证。
@@ -304,7 +303,7 @@ PHP 8.0 → 8.2+ 的已知破坏点，上线前在预发跑一遍：
 9. **`session.cookie_httponly=1`**——这是安全默认值；如果老应用依赖 JS 读取 PHPSESSID，需要在应用层覆盖。
 10. **Redis 只绑回环**——其他容器/宿主不能再直连 6379；如原有跨容器依赖，需显式改回并自行加 ACL/密码，不建议。
 11. **`ICU_DATA=en` 的行为差异**——见上文；需要 zh 等 locale 时用默认 full。
-12. **独立 PID 1**——示例 compose 已加 `init: true`；直接 `docker run` 时可加 `--init`，不替代 Supervisor 的程序管理。
+12. **独立 PID 1 与 ulimit**——示例 compose 已加 `init: true`；直接 `docker run` 时可加 `--init`，不替代 Supervisor 的程序管理。另 `supervisord.conf` 设了 `minfds=50000` / `minprocs=50000`，如果宿主机或 Docker daemon 的 hard `nofile` 低于 50000 且未配置 `ulimits`，`supervisord` 会启动失败退出。
 
 ### 生产队列与日志注意事项
 
@@ -329,6 +328,7 @@ MIT，见 [LICENSE](LICENSE)。
 ├── config/
 │   ├── php-fpm.conf
 │   ├── php-hardening.ini
+│   ├── php-min-versions.env
 │   └── supervisord.conf
 ├── build.sh
 ├── smoke-test.sh

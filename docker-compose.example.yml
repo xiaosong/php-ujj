@@ -18,7 +18,7 @@ services:
       - ./Caddyfile:/run/caddy/Caddyfile:ro         # Caddy 配置（原镜像就是从这读的）
       # - ./supervisord.d:/run/supervisor:ro        # 仅加载其中的 supervisord.conf
       # - ./php.ini:/etc/php84/php.ini:ro           # 建议挂载到所选 PHP 的实际版本路径
-      # - /etc/localtime:/etc/localtime:ro
+      # - /etc/localtime:/etc/localtime:ro          # 镜像未装 tzdata；若改用环境变量需写 TZ=CST-8（TZ=Asia/Shanghai 会退回 UTC）
     ulimits:
       nofile: 50000
     # 需要调 pm.max_children 时再放开

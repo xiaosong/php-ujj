@@ -5,11 +5,13 @@ image=${1:?Usage: bash smoke-test.sh IMAGE PLATFORM}
 platform=${2:?Usage: bash smoke-test.sh IMAGE PLATFORM}
 PHP_MAJOR=${PHP_MAJOR:-84}
 ICU_DATA=${ICU_DATA:-full}
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=config/php-min-versions.env
+. "${script_dir}/config/php-min-versions.env"
 case "${PHP_MAJOR}" in
-  82) default_min=8.2.36 ;;
-  83) default_min=8.3.37 ;;
-  84) default_min=8.4.28 ;;
-  85) default_min=8.5.13 ;;
+  83) default_min="${PHP_MIN_83}" ;;
+  84) default_min="${PHP_MIN_84}" ;;
+  85) default_min="${PHP_MIN_85}" ;;
   *) echo "Unsupported PHP_MAJOR: ${PHP_MAJOR}" >&2; exit 1 ;;
 esac
 case "${ICU_DATA}" in
@@ -146,6 +148,8 @@ if [[ "${response}" != "static-ok" ]]; then
   exit 1
 fi
 docker exec "${container}" sh -ec '
+  test -L /etc/php8 && test -d /etc/php8
+  env PATH=/sbin:/usr/sbin:/bin:/usr/bin sh -c "command -v php >/dev/null && command -v php8 >/dev/null && command -v php-fpm8 >/dev/null"
   for attempt in $(seq 1 30); do
     if test -S /tmp/php-cgi.sock && pidof crond >/dev/null &&
        test -s /tmp/smoke-worker.pid && kill -0 "$(cat /tmp/smoke-worker.pid)" &&

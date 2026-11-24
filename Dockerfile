@@ -58,30 +58,31 @@ LABEL org.opencontainers.image.title="lcrp8" \
 #      - php8-zlib  → 新版 Alpine 已把 zlib 编进 php 主程序，无此独立包
 #      - php8-json  → PHP 8 起 json 恒定内置，无此独立包
 #      - php8-redis → 改名为 php8x-pecl-redis
-# 4) 构建期拒绝未知 PHP 主版本 / ICU 选项；82 只能配 Alpine 3.22，85 内建 OPcache
+# 4) 构建期拒绝未知 PHP 主版本 / ALPINE_VERSION / ICU 选项；85 内建 OPcache
 # 5) ICU full 必须在最后装：php8x-intl 会先按 provider_priority 拉入 en 数据，
 #    再装 full 才能让完整的 icudt*.dat 覆盖掉 en 的小文件（Alpine 官方推荐做法）
 RUN set -eux; \
     case "${PHP_MAJOR}" in \
-        82|83|84|85) ;; \
-        *) echo "PHP_MAJOR must be one of 82/83/84/85" >&2; exit 1 ;; \
+        83|84|85) ;; \
+        *) echo "PHP_MAJOR must be one of 83/84/85" >&2; exit 1 ;; \
     esac; \
-    if [ "${PHP_MAJOR}" = "82" ]; then \
-        case "${ALPINE_VERSION#v}" in \
-            3.22*) ;; \
-            *) echo "PHP 8.2 is only packaged in Alpine 3.22; set ALPINE_VERSION=3.22" >&2; exit 1 ;; \
-        esac; \
-    fi; \
+    alpine_ver="${ALPINE_VERSION#v}"; \
+    case "${alpine_ver}" in \
+        [0-9]*.[0-9]*) ;; \
+        *) echo "ALPINE_VERSION must look like X.Y (got: ${ALPINE_VERSION})" >&2; exit 1 ;; \
+    esac; \
+    alpine_branch=$(printf '%s' "${alpine_ver}" | cut -d. -f1,2); \
     echo "apk cache bust: ${APK_CACHE_BUST}"; \
     case "${ICU_DATA}" in \
         en|full) ;; \
         *) echo "ICU_DATA must be en or full" >&2; exit 1 ;; \
     esac; \
     printf '%s\n%s\n' \
-        "${APK_MIRROR}/v${ALPINE_VERSION#v}/main" \
-        "${APK_MIRROR}/v${ALPINE_VERSION#v}/community" > /etc/apk/repositories; \
-    apk upgrade --no-cache; \
-    apk add --no-cache \
+        "${APK_MIRROR}/v${alpine_branch}/main" \
+        "${APK_MIRROR}/v${alpine_branch}/community" > /etc/apk/repositories; \
+    apk update; \
+    apk upgrade; \
+    apk add \
         bash curl git supervisor redis \
         php${PHP_MAJOR} \
         php${PHP_MAJOR}-fpm \
@@ -118,11 +119,11 @@ RUN set -eux; \
         php${PHP_MAJOR}-zip; \
     case "${PHP_MAJOR}" in \
         85) : ;; \
-        *)  apk add --no-cache "php${PHP_MAJOR}-opcache" ;; \
+        *)  apk add "php${PHP_MAJOR}-opcache" ;; \
     esac; \
     case "${ICU_DATA}" in \
-        full) apk add --no-cache icu-data-full ;; \
-        en)   apk add --no-cache icu-data-en ;; \
+        full) apk add icu-data-full ;; \
+        en)   apk add icu-data-en ;; \
     esac; \
     rm -rf /var/cache/apk/* /tmp/* /var/tmp/*
 
@@ -134,20 +135,21 @@ COPY config/php-fpm.conf /etc/php${PHP_MAJOR}/php-fpm.d/www.conf
 COPY config/php-hardening.ini /etc/php${PHP_MAJOR}/conf.d/99-hardening.ini
 COPY config/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
-# 兼容层：让老配置/老脚本继续按 php8 的路径工作
+# 兼容层：让老配置/老脚本继续按 php8 的路径工作（软链放到 crond 默认 PATH 内）
 #   /etc/php8 -> /etc/php84   （挂 php.ini 请改挂 /etc/php84/php.ini）
-#   php8 / php-fpm8 / php     （supervisord.conf 里的 `php-fpm8 -RF` 不用改）
+#   /usr/bin/php8 / /usr/sbin/php-fpm8 / /usr/bin/php （supervisord.conf 里的 `php-fpm8 -RF` 不用改）
 # 构建期再断言一次 PHP 版本：绕过 build.sh 直接 docker build 也不会发出带已知漏洞的镜像
-RUN set -eux; \
+RUN --mount=type=bind,source=config/php-min-versions.env,target=/tmp/php-min-versions.env \
+    set -eux; \
     ln -sfn "/etc/php${PHP_MAJOR}" /etc/php8; \
-    ln -sf "/usr/bin/php${PHP_MAJOR}" /usr/local/bin/php8; \
-    ln -sf "/usr/sbin/php-fpm${PHP_MAJOR}" /usr/local/bin/php-fpm8; \
-    ln -sf "/usr/bin/php${PHP_MAJOR}" /usr/local/bin/php; \
+    ln -sf "/usr/bin/php${PHP_MAJOR}" /usr/bin/php8; \
+    ln -sf "/usr/sbin/php-fpm${PHP_MAJOR}" /usr/sbin/php-fpm8; \
+    ln -sf "/usr/bin/php${PHP_MAJOR}" /usr/bin/php; \
+    . /tmp/php-min-versions.env; \
     case "${PHP_MAJOR}" in \
-        82) min=8.2.36 ;; \
-        83) min=8.3.37 ;; \
-        84) min=8.4.28 ;; \
-        85) min=8.5.13 ;; \
+        83) min="${PHP_MIN_83}" ;; \
+        84) min="${PHP_MIN_84}" ;; \
+        85) min="${PHP_MIN_85}" ;; \
         *)  min=0 ;; \
     esac; \
     MIN_PHP="${min}" php -r ' \

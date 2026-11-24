@@ -12,16 +12,13 @@ on:
       php_major:
         description: "PHP 主版本"
         type: choice
-        options: ["84", "83", "82", "85"]
+        options: ["84", "83", "85"]
         default: "84"
       icu_data:
         description: "ICU 数据（full=完整 locale，en=瘦身）"
         type: choice
         options: ["full", "en"]
         default: "full"
-
-env:
-  IMAGE: ghcr.io/${{ github.repository }}
 
 concurrency:
   group: image-${{ github.repository }}-${{ github.ref }}-${{ inputs.php_major || '84' }}-${{ inputs.icu_data || 'full' }}
@@ -35,6 +32,7 @@ jobs:
       contents: read
       packages: write
     outputs:
+      image: ${{ steps.vars.outputs.image }}
       digest: ${{ steps.build.outputs.digest }}
       tags: ${{ steps.meta.outputs.tags }}
       php_major: ${{ steps.vars.outputs.php_major }}
@@ -58,12 +56,12 @@ jobs:
       - name: Validate inputs
         id: vars
         env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
           PHP_MAJOR: ${{ inputs.php_major || '84' }}
           ICU_DATA: ${{ inputs.icu_data || 'full' }}
         run: |
           set -eu
           case "${PHP_MAJOR}" in
-            82) ALPINE_VERSION=3.22 ;;  # 3.24 仓库没有 php82
             83|84|85) ALPINE_VERSION=3.24 ;;
             *) echo "unsupported php_major: ${PHP_MAJOR}" >&2; exit 1 ;;
           esac
@@ -72,6 +70,8 @@ jobs:
             en) VARIANT="php${PHP_MAJOR}-en" ;;
             *) echo "unsupported icu_data: ${ICU_DATA}" >&2; exit 1 ;;
           esac
+          IMAGE="ghcr.io/$(printf '%s' "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
           echo "php_major=${PHP_MAJOR}" >> "$GITHUB_OUTPUT"
           echo "alpine_version=${ALPINE_VERSION}" >> "$GITHUB_OUTPUT"
           echo "icu_data=${ICU_DATA}" >> "$GITHUB_OUTPUT"
@@ -82,7 +82,7 @@ jobs:
         if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ${{ env.IMAGE }}
+          images: ${{ steps.vars.outputs.image }}
           flavor: latest=false
           tags: |
             type=raw,value=${{ steps.vars.outputs.variant }},enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
@@ -101,7 +101,7 @@ jobs:
           # 生成 SLSA provenance 与 SBOM，随镜像一起推到 GHCR
           provenance: true
           sbom: true
-          tags: ${{ env.IMAGE }}:candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          tags: ${{ steps.vars.outputs.image }}:candidate-${{ steps.vars.outputs.variant }}
           labels: ${{ steps.meta.outputs.labels }}
           # 重跑也刷新 apk 层，避免复用旧的安全更新结果
           build-args: |
@@ -109,8 +109,6 @@ jobs:
             ALPINE_VERSION=${{ steps.vars.outputs.alpine_version }}
             ICU_DATA=${{ steps.vars.outputs.icu_data }}
             APK_CACHE_BUST=${{ github.run_id }}-${{ github.run_attempt }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
   # 各架构在原生 runner 上测试：qemu 仿真下 Redis 的 MADV_FREE/fork 内核探测会误判，
   # 直接 exit 1（ARM64-COW-BUG），无法用来判断镜像本身是否正常。
@@ -134,8 +132,6 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-
       - name: Login GHCR
         uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
@@ -145,6 +141,7 @@ jobs:
 
       - name: Test candidate
         env:
+          IMAGE: ${{ needs.build.outputs.image }}
           PHP_MAJOR: ${{ needs.build.outputs.php_major }}
           ICU_DATA: ${{ needs.build.outputs.icu_data }}
           DIGEST: ${{ needs.build.outputs.digest }}
@@ -163,8 +160,6 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-
       - name: Login GHCR
         uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
@@ -174,6 +169,7 @@ jobs:
 
       - name: Promote verified image
         env:
+          IMAGE: ${{ needs.build.outputs.image }}
           DIGEST: ${{ needs.build.outputs.digest }}
           TAGS: ${{ needs.build.outputs.tags }}
         run: |

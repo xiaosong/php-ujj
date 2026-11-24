@@ -3,7 +3,6 @@
 #
 #   ./build.sh                      # PHP 8.4 / alpine 3.24 / linux/amd64 / 完整 ICU
 #   PHP_MAJOR=83 ./build.sh         # PHP 8.3
-#   PHP_MAJOR=82 ALPINE_VERSION=3.22 ./build.sh   # PHP 8.2 只在 3.22 仓库里
 #   ICU_DATA=en ./build.sh          # 瘦身：仅 en_US/GB 的 ICU 数据（省约 28.7MiB）
 #   APK_CACHE_BUST=$(date +%s) ./build.sh         # 强制 apk 层重建，拉最新安全更新
 #   APK_MIRROR=https://mirrors.aliyun.com/alpine ./build.sh
@@ -23,13 +22,9 @@ PLATFORMS=${PLATFORMS:-linux/amd64}
 PUSH=${PUSH:-0}
 
 case "${PHP_MAJOR}" in
-  82|83|84|85) ;;
-  *) echo "PHP_MAJOR 仅支持 82/83/84/85，收到: ${PHP_MAJOR}" >&2; exit 1 ;;
+  83|84|85) ;;
+  *) echo "PHP_MAJOR 仅支持 83/84/85，收到: ${PHP_MAJOR}" >&2; exit 1 ;;
 esac
-if [[ "${PHP_MAJOR}" == "82" && "${ALPINE_VERSION#v}" != 3.22* ]]; then
-  echo "PHP_MAJOR=82 只能配 ALPINE_VERSION=3.22（3.24 仓库里没有 php82）" >&2
-  exit 1
-fi
 case "${ICU_DATA}" in
   full) variant="php${PHP_MAJOR}" ;;
   en) variant="php${PHP_MAJOR}-en" ;;
@@ -73,7 +68,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 if [[ "${PUSH}" == "1" ]]; then
-  candidate="${IMAGE}:candidate-${variant}-$(date +%s)-$$-${RANDOM}"
+  candidate="${IMAGE}:candidate-${variant}"
   docker buildx build --pull --platform "${PLATFORMS}" "${build_args[@]}" \
     --provenance=true --sbom=true -t "${candidate}" --push "${script_dir}"
   digest=$(docker buildx imagetools inspect "${candidate}" --format '{{.Manifest.Digest}}')
