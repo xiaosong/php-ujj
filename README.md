@@ -87,7 +87,7 @@ curl -s https://dl-cdn.alpinelinux.org/alpine/v3.25/community/x86_64/APKINDEX.ta
 - Redis 显式 `--bind 127.0.0.1 -::1 --protected-mode yes`，不再可能监听外部地址
 - php-fpm unix socket 显式 `listen.mode = 0660`
 - compose 示例加 `no-new-privileges:true`
-- CI action 全部固定到 commit SHA；手动输入先白名单校验；candidate 按 digest 逐架构测试通过后才提升正式标签；生成 SLSA provenance + SBOM
+- CI action 全部固定到 commit SHA；手动输入先白名单校验；双架构分别原生构建并按 digest 冒烟通过后再合并发布正式标签；生成 SLSA provenance + SBOM
 - Dockerfile 构建期再次断言 PHP 最低版本（绕过 `build.sh` 直接 `docker build` 也拦得住）
 - Dependabot 每周跟踪 CI action 升级；Caddy 由 `caddy:2-alpine` 浮动 tag + 周构建跟进，Alpine 分支手动升级
 
@@ -270,11 +270,11 @@ PHP 8.0 → 8.2+ 的已知破坏点，上线前在预发跑一遍：
 - CI action 固定到 commit SHA，由 Dependabot 更新；不要直接改回浮动 tag。
 - CI 每次把 `github.run_id-github.run_attempt` 组成的值传给 `APK_CACHE_BUST`，包括重跑也强制 apk 层重建；否则 buildx 缓存会让 `apk upgrade` 直接复用旧层，周构建拿不到新包（CI 也因此不启用无收益的 GHA 层缓存）。本地用 `APK_CACHE_BUST=$(date +%s) ./build.sh` 达到同样效果。
 - PHP 8.5 内建 OPcache，仅不安装独立包，所有支持分支都必须通过 OPcache 检查；最低版本线统一维护在 [`config/php-min-versions.env`](config/php-min-versions.env)。
-- 发布分三个 job：`build` 推送固定名称的 `candidate-<variant>` 标签并输出 image/digest/tags，`test` 按架构矩阵在**原生 runner**（amd64 `ubuntu-latest`、arm64 `ubuntu-24.04-arm`）运行共享 `smoke-test.sh`，`promote` 需要两者都成功才用 `imagetools` 将同一产物提升为正式标签，产物摘要记录 digest。测试失败不更新正式标签。
-- 测试不用 qemu 跑异架构：仿真下 Redis 的 `MADV_FREE`+fork 内核探测会误判成 `ARM64-COW-BUG` 并 `exit 1`，无法反映镜像本身是否正常。该保护对真实受影响内核有效，**不要往镜像里加 `ignore-warnings`**。
-- `smoke-test.sh` 收到 `image@digest` 时先解析该平台的子清单 digest 再拉取测试：经典 image store 只把一个 index digest 绑定到单个平台，直接拉第二个平台会报 `cannot overwrite digest`。提升正式标签仍用多架构 index digest。
+- 发布分三个 job：`prepare` 计算构建参数与目标标签，`build` 按架构矩阵在**原生 runner**（amd64 `ubuntu-latest`、arm64 `ubuntu-24.04-arm`，不使用 QEMU 仿真）分别构建并按 digest 推送 GHCR，同机运行共享 `smoke-test.sh`，`merge` 需要两个架构都通过后才用 `imagetools create` 合并为统一多架构清单并打上正式标签，产物摘要记录最终 digest 与各平台 digest。由于按 digest 直推且未通过前不打标签，不再产生 `candidate-*` 临时标签；测试失败不更新正式标签。
+- 不用 QEMU 跑异架构构建或测试：仿真下不仅构建慢，Redis 的 `MADV_FREE`+fork 内核探测还会误判成 `ARM64-COW-BUG` 并 `exit 1`。该保护对真实受影响内核有效，**不要往镜像里加 `ignore-warnings`**。
+- `smoke-test.sh` 收到 `image@digest` 时先检查 `MediaType`，若为多架构/含 attestation 的 index 则解析该平台的子清单 digest 再拉取测试（经典 image store 只把一个 index digest 绑定到单个平台，直接拉第二个平台会报 `cannot overwrite digest`），若是单平台 manifest 则直接拉取。`merge` 后发布为完整多架构 index。
 - 共享测试验证 PHP 版本及主版本、全部约定扩展、OPcache（含 8.5）、安全默认值和 ICU locale；以原 CMD 完整启动 Caddy/FPM/Redis/cron，检查静态与 PHP HTTP 请求、Redis PING、额外挂载测试任务及容器退出。这不替代现网队列和应用的预发验证。
-- 标签区分 ICU：full 保持 `php84` / `php84-YYYYMMDD`；en 使用 `php84-en` / `php84-en-YYYYMMDD`，其他 PHP 分支同理。CI 仅允许默认分支更新这些标签，`latest` 还限定 PHP84/full；推送 `v*` Git 标签只发布对应版本号，不更新上述滚动标签。其他分支或在 Git 标签上手动运行时只构建并测试 candidate，不发布正式标签；本地构建不更新 `latest`。
+- 标签区分 ICU：full 保持 `php84` / `php84-YYYYMMDD`；en 使用 `php84-en` / `php84-en-YYYYMMDD`，其他 PHP 分支同理。CI 仅允许默认分支更新这些标签，`latest` 还限定 PHP84/full；推送 `v*` Git 标签只发布对应版本号，不更新上述滚动标签。其他分支或在 Git 标签上手动运行时只按 digest 构建并测试，不合并发布正式标签；本地构建不更新 `latest`。
 - 本地 `PUSH=1` 同样先按 digest 测试目标架构再提升标签，不能只依赖远端构建器：本机需要 Docker daemon，非本机架构需要跨架构仿真。异架构测试会撞上上面那条 Redis 探测误判，多架构发布请走 CI 或原生 arm64 机器。默认本地单平台构建也必须测试通过才打正式标签。
 
 出新 CVE 时的处理顺序：

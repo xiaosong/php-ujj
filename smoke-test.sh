@@ -21,15 +21,23 @@ esac
 MIN_PHP=${MIN_PHP:-${default_min}}
 
 # 经典 image store 把一个 index digest 只绑定到一个平台，按同一个 index digest
-# 拉第二个平台会报 cannot overwrite digest，所以先解析该平台的子清单 digest。
+# 拉第二个平台会报 cannot overwrite digest；若传入的是多架构/含 attestation 的 index，
+# 先解析该平台的子清单 digest，若是单平台 manifest 则直接拉取。
 if [[ "${image}" == *@sha256:* ]]; then
-  platform_digest=$(docker buildx imagetools inspect "${image}" --format \
-    "{{range .Manifest.Manifests}}{{if .Platform}}{{if eq (printf \"%s/%s\" .Platform.OS .Platform.Architecture) \"${platform}\"}}{{.Digest}}{{end}}{{end}}{{end}}")
-  if [[ ! "${platform_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-    echo "Cannot resolve a single ${platform} manifest in ${image}: ${platform_digest}" >&2
+  media_type=$(docker buildx imagetools inspect "${image}" | awk '/^MediaType:/ && !seen {mt=$2; seen=1} END {print mt}')
+  if [[ -z "${media_type}" ]]; then
+    echo "Cannot inspect MediaType for ${image}" >&2
     exit 1
   fi
-  image="${image%@*}@${platform_digest}"
+  if [[ "${media_type}" == "application/vnd.oci.image.index.v1+json" || "${media_type}" == "application/vnd.docker.distribution.manifest.list.v2+json" ]]; then
+    platform_digest=$(docker buildx imagetools inspect "${image}" --format \
+      "{{range .Manifest.Manifests}}{{if .Platform}}{{if eq (printf \"%s/%s\" .Platform.OS .Platform.Architecture) \"${platform}\"}}{{.Digest}}{{end}}{{end}}{{end}}")
+    if [[ ! "${platform_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+      echo "Cannot resolve a single ${platform} manifest in ${image}: ${platform_digest}" >&2
+      exit 1
+    fi
+    image="${image%@*}@${platform_digest}"
+  fi
   docker pull --platform "${platform}" "${image}"
 fi
 

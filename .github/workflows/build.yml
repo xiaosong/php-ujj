@@ -25,33 +25,20 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
+  prepare:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 5
     permissions:
       contents: read
-      packages: write
     outputs:
       image: ${{ steps.vars.outputs.image }}
-      digest: ${{ steps.build.outputs.digest }}
-      tags: ${{ steps.meta.outputs.tags }}
       php_major: ${{ steps.vars.outputs.php_major }}
+      alpine_version: ${{ steps.vars.outputs.alpine_version }}
       icu_data: ${{ steps.vars.outputs.icu_data }}
+      variant: ${{ steps.vars.outputs.variant }}
+      labels: ${{ steps.meta.outputs.labels }}
+      tags: ${{ steps.meta.outputs.tags }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-
-      - name: Login GHCR
-        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
       # workflow_dispatch 的输入不直接进 shell / build-args，先白名单校验再输出
       - name: Validate inputs
         id: vars
@@ -90,47 +77,30 @@ jobs:
             type=ref,event=tag,enable=${{ github.event_name == 'push' }}
             type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.vars.outputs.variant == 'php84' }}
 
-      - name: Build candidate
-        id: build
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          pull: true
-          # 生成 SLSA provenance 与 SBOM，随镜像一起推到 GHCR
-          provenance: true
-          sbom: true
-          tags: ${{ steps.vars.outputs.image }}:candidate-${{ steps.vars.outputs.variant }}
-          labels: ${{ steps.meta.outputs.labels }}
-          # 重跑也刷新 apk 层，避免复用旧的安全更新结果
-          build-args: |
-            PHP_MAJOR=${{ steps.vars.outputs.php_major }}
-            ALPINE_VERSION=${{ steps.vars.outputs.alpine_version }}
-            ICU_DATA=${{ steps.vars.outputs.icu_data }}
-            APK_CACHE_BUST=${{ github.run_id }}-${{ github.run_attempt }}
-
-  # 各架构在原生 runner 上测试：qemu 仿真下 Redis 的 MADV_FREE/fork 内核探测会误判，
-  # 直接 exit 1（ARM64-COW-BUG），无法用来判断镜像本身是否正常。
-  test:
-    needs: build
+  # 原生双 Runner 分别构建并同机跑冒烟测试：避免 QEMU 仿真构建慢与 Redis ARM64-COW-BUG 误判。
+  build:
+    needs: prepare
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions:
       contents: read
-      packages: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
         include:
           - platform: linux/amd64
             runner: ubuntu-latest
+            platform_slug: linux-amd64
           - platform: linux/arm64
             runner: ubuntu-24.04-arm
+            platform_slug: linux-arm64
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Login GHCR
         uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
@@ -139,27 +109,72 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          pull: true
+          # 生成 SLSA provenance 与 SBOM，按 digest 随单架构清单一起推到 GHCR
+          provenance: true
+          sbom: true
+          labels: ${{ needs.prepare.outputs.labels }}
+          outputs: type=image,name=${{ needs.prepare.outputs.image }},push-by-digest=true,name-canonical=true,push=true
+          # 重跑也刷新 apk 层，避免复用旧的安全更新结果
+          build-args: |
+            PHP_MAJOR=${{ needs.prepare.outputs.php_major }}
+            ALPINE_VERSION=${{ needs.prepare.outputs.alpine_version }}
+            ICU_DATA=${{ needs.prepare.outputs.icu_data }}
+            APK_CACHE_BUST=${{ github.run_id }}-${{ github.run_attempt }}
+
       - name: Test candidate
         env:
-          IMAGE: ${{ needs.build.outputs.image }}
-          PHP_MAJOR: ${{ needs.build.outputs.php_major }}
-          ICU_DATA: ${{ needs.build.outputs.icu_data }}
-          DIGEST: ${{ needs.build.outputs.digest }}
+          IMAGE: ${{ needs.prepare.outputs.image }}
+          PHP_MAJOR: ${{ needs.prepare.outputs.php_major }}
+          ICU_DATA: ${{ needs.prepare.outputs.icu_data }}
+          DIGEST: ${{ steps.build.outputs.digest }}
           PLATFORM: ${{ matrix.platform }}
         run: |
           set -euo pipefail
+          if [[ ! "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Invalid digest: ${DIGEST}" >&2
+            exit 1
+          fi
           bash smoke-test.sh "${IMAGE}@${DIGEST}" "${PLATFORM}"
 
-  promote:
-    needs: [build, test]
-    # needs 自带 success()：两个架构的测试都通过才会执行
-    if: needs.build.outputs.tags != ''
+      - name: Export digest
+        if: needs.prepare.outputs.tags != ''
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          PLATFORM_SLUG: ${{ matrix.platform_slug }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/digests"
+          printf '%s\n' "${DIGEST}" > "${RUNNER_TEMP}/digests/${PLATFORM_SLUG}.digest"
+
+      - name: Upload digest
+        if: needs.prepare.outputs.tags != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: digest-${{ matrix.platform_slug }}
+          path: ${{ runner.temp }}/digests/${{ matrix.platform_slug }}.digest
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: [prepare, build]
+    # needs 自带 success()：两个架构的构建与冒烟测试都通过才会执行
+    if: needs.prepare.outputs.tags != ''
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
       packages: write
     steps:
+      # 使用新版 buildx 合并单架构清单，确保完整保留各自的 provenance 与 SBOM attestation
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
       - name: Login GHCR
         uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
@@ -167,21 +182,48 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Promote verified image
+      - name: Download digests
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Merge and publish multi-arch image
         env:
-          IMAGE: ${{ needs.build.outputs.image }}
-          DIGEST: ${{ needs.build.outputs.digest }}
-          TAGS: ${{ needs.build.outputs.tags }}
+          IMAGE: ${{ needs.prepare.outputs.image }}
+          TAGS: ${{ needs.prepare.outputs.tags }}
         run: |
           set -euo pipefail
+          amd64_digest=$(tr -d '[:space:]' < "${RUNNER_TEMP}/digests/linux-amd64.digest")
+          arm64_digest=$(tr -d '[:space:]' < "${RUNNER_TEMP}/digests/linux-arm64.digest")
+          for d in "${amd64_digest}" "${arm64_digest}"; do
+            if [[ ! "${d}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "Invalid platform digest: ${d}" >&2
+              exit 1
+            fi
+          done
           tag_args=()
+          first_tag=
           while IFS= read -r tag; do
             if [ -n "$tag" ]; then
               tag_args+=(-t "$tag")
+              if [ -z "$first_tag" ]; then
+                first_tag="$tag"
+              fi
             fi
           done <<< "$TAGS"
-          docker buildx imagetools create "${tag_args[@]}" "${IMAGE}@${DIGEST}"
+          if [ -z "$first_tag" ]; then
+            echo "No tags resolved for merge" >&2
+            exit 1
+          fi
+          docker buildx imagetools create "${tag_args[@]}" \
+            "${IMAGE}@${amd64_digest}" "${IMAGE}@${arm64_digest}"
+          final_digest=$(docker buildx imagetools inspect "${first_tag}" --format '{{.Manifest.Digest}}')
+          docker buildx imagetools inspect "${IMAGE}@${final_digest}"
           {
-            printf '## Verified image\n\n`%s@%s`\n\n' "$IMAGE" "$DIGEST"
+            printf '## Verified image\n\n`%s@%s`\n\n' "$IMAGE" "$final_digest"
+            printf -- '- `linux/amd64`: `%s`\n' "$amd64_digest"
+            printf -- '- `linux/arm64`: `%s`\n\n' "$arm64_digest"
             printf 'Tags:\n```text\n%s\n```\n' "$TAGS"
           } >> "$GITHUB_STEP_SUMMARY"
